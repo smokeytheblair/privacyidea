@@ -36,6 +36,8 @@ all further API calls.
 
    *An action is bound to the event* token_init.
 
+.. _eventhandler_pre_and_post:
+
 Pre and Post Handling
 ---------------------
 
@@ -94,7 +96,7 @@ Conditions
 Added in version 2.14
 
 An event handler module may also contain conditions. Only if all conditions
-are fullfilled, the action is triggered. Conditions are defined in the class
+are fulfilled, the action is triggered. Conditions are defined in the class
 property *conditions* and checked in the method *check_condition*. The base class
 for event handlers currently defines those conditions. So all event handlers come with
 the same conditions.
@@ -137,6 +139,14 @@ less than 99 or exactly 100.
 
 This can be '>100', '<99', or '=100', to trigger the action, if the tokeninfo field
 'count_auth_success' is bigger than 100, less than 99 or exactly 100.
+
+**failcounter**
+
+This is the ``failcount`` of the token. It is increased on failed authentication
+attempts. If it reaches ``max_failcount`` increasing will stop and the token is locked.
+See :ref:`failcounter`.
+
+The condition can be set to '>9', '=10', or '<5' and it will trigger the action accordingly.
 
 **detail_error_message**
 
@@ -181,7 +191,7 @@ expression matches the detail->message in the response.
 This condition checks if the last authentication is older than the specified
 time delta. The timedelta is specified with "h" (hours), "d" (days) or "y"
 (years). Specifying *180d* would mean, that the action is triggered if the
-last successful authentication witht he token was berformed more than 180
+last successful authentication with the token was performed more than 180
 days ago.
 
 This can be used to send notifications to users or administrators to inform
@@ -331,7 +341,18 @@ This can be used to e.g. automatically enroll a token for the user if the
 user has no tokens left (token_number == 0) of to notify the administrator if
 the user has to many tokens assigned.
 
+**counter**
 
+The counter condition can compare the value of any arbitrary event counter against a fixed
+value. Valid compares are:
+
+    myCounter == 1000
+    myCounter > 1000
+    myCounter < 1000
+
+"myCounter" being any event counter set with the :ref:`counterhandler`.
+
+.. note:: A non-existing counter value will compare as 0 (zero).
 
 Managing Events
 ---------------
@@ -358,3 +379,4 @@ Available Handler Modules
    federationhandler
    requestmangler
    responsemangler
+   logginghandler

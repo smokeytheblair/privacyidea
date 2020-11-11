@@ -48,6 +48,7 @@
 # ./manage.py db migrate
 # ./manage.py createdb
 #
+from __future__ import print_function
 import os
 import sys
 import datetime
@@ -91,8 +92,11 @@ from privacyidea.lib.audit import getAudit
 from privacyidea.lib.authcache import cleanup as authcache_cleanup
 from privacyidea.lib.utils import parse_timedelta
 from privacyidea.lib.crypto import create_hsm_object
+from privacyidea.lib.importotp import parseOATHcsv
+from privacyidea.lib.token import import_token
 import jwt
 import ast
+import base64
 
 SILENT = True
 MYSQL_DIALECTS = ["mysql", "pymysql", "mysql+pymysql"]
@@ -102,7 +106,8 @@ manager = Manager(app)
 admin_manager = Manager(usage='Create new administrators or modify existing '
                               'ones.')
 backup_manager = Manager(usage='Create database backup and restore')
-realm_manager = Manager(usage='Create new realms')
+realm_manager = Manager(usage='Create new realms, delete existing realms '
+                              'or set the default realm')
 resolver_manager = Manager(usage='Create new resolver')
 policy_manager = Manager(usage='Manage policies')
 event_manager = Manager(usage='Manage events')
@@ -111,6 +116,7 @@ ca_manager = Manager(usage="Manage Certificate Authorities")
 audit_manager = Manager(usage="Manage Audit log")
 authcache_manager = Manager(usage="Manage AuthCache")
 hsm_manager = Manager(usage="Manage HSM")
+token_manager = Manager(usage="Manage tokens")
 manager.add_command('db', MigrateCommand)
 manager.add_command('admin', admin_manager)
 manager.add_command('backup', backup_manager)
@@ -123,6 +129,7 @@ manager.add_command('ca', ca_manager)
 manager.add_command('audit', audit_manager)
 manager.add_command('authcache', authcache_manager)
 manager.add_command('hsm', hsm_manager)
+manager.add_command('token', token_manager)
 
 
 @hsm_manager.command
@@ -327,6 +334,7 @@ def _write_mysql_defaults(filename, username, password):
     """
     with open(filename, "w") as f:
         f.write("""[client]
+no-tablespaces=True
 user={0!s}
 password={1!s}""".format(username, password))
 
@@ -446,9 +454,13 @@ def encrypt_enckey(encfile):
 
 
 @manager.command
-def create_enckey():
+def create_enckey(enckey_b64=None):
     """
-    If the key of the given configuration does not exist, it will be created
+    If the key of the given configuration does not exist, it will be created.
+
+
+    :param enckey_b64: (Optional) base64 encoded plain text key
+    :return:
     """
     print()
     filename = app.config.get("PI_ENCFILE")
@@ -457,8 +469,15 @@ def create_enckey():
               filename)
         sys.exit(1)
     with open(filename, "wb") as f:
-        f.write(DefaultSecurityModule.random(96))
-
+        if enckey_b64 is None:
+            f.write(DefaultSecurityModule.random(96))
+        else:
+            print("Warning: Passing enckey via cli input is considered harmful.")
+            bin_enckey = base64.b64decode(enckey_b64)
+            if len(bin_enckey) != 96:
+                print("Error: enckey must be 96 bytes length")
+                sys.exit(1)
+            f.write(bin_enckey)
     print("Encryption key written to %s" % filename)
     os.chmod(filename, 0o400)
     print("The file permission of %s was set to 400!" % filename)
@@ -481,6 +500,14 @@ def create_pgp_keys(keysize=2048, force=False):
     input_data = gpg.gen_key_input(key_type="RSA", key_length=keysize,
                                    name_real="privacyIDEA Server",
                                    name_comment="Import")
+    inputs = input_data.split("\n")
+    if inputs[-2] == "%commit":
+        del(inputs[-1])
+        del(inputs[-1])
+        inputs.append("%no-protection")
+        inputs.append("%commit")
+        inputs.append("")
+        input_data = "\n".join(inputs)
     gpg.gen_key(input_data)
 
 
@@ -930,16 +957,44 @@ realm_manager.add_command('list', Command(list_realms))
 
 
 @realm_manager.command
-def create(name, resolver):
+def create(name, resolvers):
     """
     Create a new realm.
-    This will create a new realm with the given resolver.
-    *restriction*: The new realm will only contain one resolver!
-
-    :return:
+    This will create a new realm with the given resolver
+    or a comma-separated list of resolvers. An existing realm
+    with the same name will be replaced.
     """
     from privacyidea.lib.realm import set_realm
-    set_realm(name, [resolver])
+    resolvers = resolvers.split(",")
+    set_realm(name, resolvers)
+
+
+@realm_manager.command
+def delete(realm):
+    """
+    Delete the given realm
+    """
+    from privacyidea.lib.realm import delete_realm
+    delete_realm(realm)
+
+
+@realm_manager.command
+def set_default(realm):
+    """
+    Set the given realm to default
+    """
+    from privacyidea.lib.realm import set_default_realm
+    set_default_realm(realm)
+
+
+@realm_manager.command
+def clear_default():
+    """
+    Unset the default realm
+    """
+    from privacyidea.lib.realm import set_default_realm
+    set_default_realm(None)
+
 
 # Event interface
 
@@ -1126,6 +1181,7 @@ def p_import(filename, cleanup=False):
                        action=policy.get("action"),
                        active=policy.get("active", True),
                        adminrealm=policy.get("adminrealm"),
+                       adminuser=policy.get("adminuser"),
                        check_all_resolvers=policy.get(
                            "check_all_resolvers", False),
                        client=policy.get("client"),
@@ -1161,7 +1217,7 @@ def create(name, scope, action, filename=None):
             else:
                 print("name not defined in file, will use the cli value "
                       "{0!s}.".format(name))
-                params["scope"] = name
+                params["name"] = name
 
             if params.get("scope") and params.get("scope") != scope:
                 print("Found scope '{0!s}' in file, will use that instead of "
@@ -1189,6 +1245,7 @@ def create(name, scope, action, filename=None):
                            client=params.get("client"),
                            active=params.get("active", True),
                            adminrealm=params.get("adminrealm"),
+                           adminuser=params.get("adminuser"),
                            check_all_resolvers=params.get(
                                "check_all_resolvers", False))
             return r
@@ -1241,6 +1298,26 @@ def createtoken(role, days, realm, username):
     print("Role:       {0!s}".format(role))
     print("Validity:   {0!s} days".format(days))
     print("Auth-Token: {0!s}".format(token))
+
+
+def import_tokens(file, tokenrealm=None):
+    """
+    Import Tokens from a CSV file
+    """
+    contents = ""
+    with open(file, "r") as f:
+        contents = f.read()
+    tokens = parseOATHcsv(contents)
+    tokenrealms = [tokenrealm] if tokenrealm else []
+    i = 0
+    for serial in tokens:
+        i += 1
+        print(u"{0!s}/{1!s} Importing token {2!s}".format(i, len(tokens), serial))
+
+        import_token(serial, tokens[serial], tokenrealms=tokenrealm)
+
+
+token_manager.add_command('import', Command(import_tokens))
 
 
 if __name__ == '__main__':

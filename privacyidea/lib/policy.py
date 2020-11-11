@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 #
+#  2020-06-05 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#             Add privacyIDEA nodes
 #  2019-09-26 Friedrich Weber <friedrich.weber@netknights.it>
 #             Add a high-level API for policy matching
 #  2019-07-01 Cornelius Kölbel <cornelius.koelbel@netknights.it>
@@ -169,14 +171,14 @@ import six
 import logging
 from ..models import (Policy, db, save_config_timestamp)
 from privacyidea.lib.config import (get_token_classes, get_token_types,
-                                    get_config_object)
+                                    get_config_object, get_privacyidea_node)
 from privacyidea.lib.framework import get_app_config_value
 from privacyidea.lib.error import ParameterError, PolicyError, ResourceNotFoundError, ServerError
 from privacyidea.lib.realm import get_realms
 from privacyidea.lib.resolver import get_resolver_list
 from privacyidea.lib.smtpserver import get_smtpservers
 from privacyidea.lib.radiusserver import get_radiusservers
-from privacyidea.lib.utils import (check_time_in_range, reload_db,
+from privacyidea.lib.utils import (check_time_in_range, check_pin_contents,
                                    fetch_one_resource, is_true, check_ip_in_policy,
                                    determine_logged_in_userparams)
 from privacyidea.lib.utils.compare import compare_values, CompareError, COMPARATOR_FUNCTIONS, COMPARATORS, \
@@ -186,6 +188,7 @@ from privacyidea.lib import _
 import datetime
 import re
 import ast
+import traceback
 from six import with_metaclass, string_types
 
 log = logging.getLogger(__name__)
@@ -206,15 +209,16 @@ class SCOPE(object):
     AUDIT = "audit"
     USER = "user"   # was selfservice
     ENROLL = "enrollment"
-    GETTOKEN = "gettoken"
     WEBUI = "webui"
     REGISTER = "register"
 
 
 class ACTION(object):
     __doc__ = """This is the list of usual actions."""
+    ADMIN_DASHBOARD = "admin_dashboard"
     ASSIGN = "assign"
     APPIMAGEURL = "appimageurl"
+    APPLICATION_TOKENTYPE = "application_tokentype"
     AUDIT = "auditlog"
     AUDIT_AGE = "auditlog_age"
     AUDIT_DOWNLOAD = "auditlog_download"
@@ -333,6 +337,7 @@ class ACTION(object):
     SMSGATEWAYREAD = "smsgateway_read"
     CHANGE_PIN_FIRST_USE = "change_pin_on_first_use"
     CHANGE_PIN_EVERY = "change_pin_every"
+    CHANGE_PIN_VIA_VALIDATE = "change_pin_via_validate"
     CLIENTTYPE = "clienttype"
     REGISTERBODY = "registration_body"
     RESETALLTOKENS = "reset_all_user_tokens"
@@ -353,6 +358,12 @@ class ACTION(object):
     SHOW_ANDROID_AUTHENTICATOR = "show_android_privacyidea_authenticator"
     SHOW_IOS_AUTHENTICATOR = "show_ios_privacyidea_authenticator"
     SHOW_CUSTOM_AUTHENTICATOR = "show_custom_authenticator"
+    AUTHORIZED = "authorized"
+
+
+class AUTHORIZED(object):
+    ALLOW = "grant_access"
+    DENY = "deny_access"
 
 
 class GROUP(object):
@@ -366,7 +377,9 @@ class GROUP(object):
     MACHINE = "machine"
     USER = "user"
     PIN = "pin"
-
+    MODIFYING_RESPONSE = "modifying response"
+    CONDITIONS = "conditions"
+    SETTING_ACTIONS = "setting actions"
 
 class MAIN_MENU(object):
     __doc__ = """These are the allowed top level menu items. These are used
@@ -378,6 +391,7 @@ class MAIN_MENU(object):
     CONFIG = "config"
     AUDIT = "audit"
     COMPONENTS = "components"
+
 
 
 class LOGINMODE(object):
@@ -478,7 +492,7 @@ class PolicyClass(object):
 
     @log_with(log)
     def list_policies(self, name=None, scope=None, realm=None, active=None,
-                      resolver=None, user=None, client=None, action=None,
+                      resolver=None, user=None, client=None, action=None, pinode=None,
                       adminrealm=None, adminuser=None, sort_by_priority=True):
         """
         Return the policies, filtered by the given values.
@@ -500,6 +514,7 @@ class PolicyClass(object):
         :param realm: The realm in the policy
         :param active: One of None, True, False: All policies, only active or only inactive policies
         :param resolver: Only policies with this resolver
+        :param pinode: Only policies with this privacyIDEA node
         :param user: Only policies with this user
         :type user: basestring
         :param client:
@@ -586,6 +601,17 @@ class PolicyClass(object):
             log.debug("Policies after matching resolver: {0!s}".format(
                 reduced_policies))
 
+        # Match the privacyIDEA node
+        if pinode is not None:
+            new_policies = []
+            for policy in reduced_policies:
+                # The policy either matches if it has no pinode defined or if the pinode is contained in the list
+                if not policy.get("pinode") or pinode in policy.get("pinode"):
+                    new_policies.append(policy)
+
+            reduced_policies = new_policies
+            log.debug("Policies after matching pinode: {0!s}".format(reduced_policies))
+
         # Match the client IP.
         # Client IPs may be direct match, may be located in subnets or may
         # be excluded by a leading "-" or "!" sign.
@@ -614,7 +640,7 @@ class PolicyClass(object):
                 if not policy.get("client"):
                     new_policies.append(policy)
             reduced_policies = new_policies
-            log.debug("Policies after matching client".format(
+            log.debug("Policies after matching client: {0!s}".format(
                 reduced_policies))
 
         if sort_by_priority:
@@ -622,8 +648,9 @@ class PolicyClass(object):
 
         return reduced_policies
 
+    @log_with(log)
     def match_policies(self, name=None, scope=None, realm=None, active=None,
-                       resolver=None, user=None, user_object=None,
+                       resolver=None, user=None, user_object=None, pinode=None,
                        client=None, action=None, adminrealm=None, adminuser=None, time=None,
                        sort_by_priority=True, audit_data=None, request_headers=None):
         """
@@ -648,6 +675,7 @@ class PolicyClass(object):
         :param action: see ``list_policies``
         :param adminrealm: see ``list_policies``
         :param adminuser: see ``list_policies``
+        :param pinode: see ``list_policies``
         :param sort_by_priority:
         :param user_object: the currently active user, or None
         :type user_object: User or None
@@ -661,17 +689,26 @@ class PolicyClass(object):
         """
         if user_object is not None:
             # if a user_object is passed, we check, if it differs from potentially passed user, resolver, realm:
-            if (user and user != user_object.login) \
-                    or (resolver and resolver != user_object.resolver) \
+            if (user and user.lower() != user_object.login.lower()) \
+                    or (resolver and resolver.lower() != user_object.resolver.lower()) \
                     or (realm and realm != user_object.realm):
-                raise ParameterError("Cannot pass user_object as well as user, resolver, realm")
+                tb_str = ''.join(traceback.format_stack())
+                log.warning("Cannot pass user_object as well as user, resolver, realm "
+                            "in policy {0!s}. "
+                            "{1!s} - {2!s}@{3!s} in resolver {4!s}".format((name, scope, action),
+                                                                           user_object, user, realm, resolver))
+                log.warning("Possible programming error: {0!s}".format(tb_str))
+                raise ParameterError("Cannot pass user_object ({1!s}) as well as user ({2!s}),"
+                                     " resolver ({3!s}), realm ({4!s})"
+                                     "in policy {0!s}".format((name, scope, action), user_object,
+                                                              user, resolver, realm))
             user = user_object.login
             realm = user_object.realm
             resolver = user_object.resolver
 
         reduced_policies = self.list_policies(name=name, scope=scope, realm=realm, active=active,
                                               resolver=resolver, user=user, client=client, action=action,
-                                              adminrealm=adminrealm, adminuser=adminuser,
+                                              adminrealm=adminrealm, adminuser=adminuser, pinode=pinode,
                                               sort_by_priority=sort_by_priority)
 
         # filter policy for time. If no time is set or is a time is set and
@@ -680,13 +717,11 @@ class PolicyClass(object):
                             (policy.get("time") and
                              check_time_in_range(policy.get("time"), time))
                             or not policy.get("time")]
-        log.debug("Policies after matching time: {0!s}".format(
-            reduced_policies))
+        log.debug("Policies after matching time: {0!s}".format([p.get("name") for p in reduced_policies]))
 
         # filter policies by the policy conditions
         reduced_policies = self.filter_policies_by_conditions(reduced_policies, user_object, request_headers)
-        log.debug("Policies after matching conditions".format(
-            reduced_policies))
+        log.debug("Policies after matching conditions".format([p.get("name") for p in reduced_policies]))
 
         if audit_data is not None:
             for p in reduced_policies:
@@ -791,14 +826,14 @@ class PolicyClass(object):
                     policy['name']
                 ))
         else:
-            log.warning(u"Policy {!r} has condition on userinfo {!r}, but userinfo is not available".format(
+            log.warning(u"Policy {!r} has condition on userinfo {!r}, but a user_object is not available".format(
                 policy['name'], key
             ))
             # If the policy specifies a userinfo condition, but no user object is available,
             # the policy is misconfigured. We have to raise a PolicyError to ensure that
             # the privacyIDEA server does not silently misbehave.
             raise PolicyError(
-                u"Policy {!r} has condition on userinfo, but userinfo is not available".format(
+                u"Policy {!r} has condition on userinfo, but a user_object is not available".format(
                     policy['name']
                 ))
 
@@ -1082,7 +1117,7 @@ class PolicyClass(object):
 def set_policy(name=None, scope=None, action=None, realm=None, resolver=None,
                user=None, time=None, client=None, active=True,
                adminrealm=None, adminuser=None, priority=None, check_all_resolvers=False,
-               conditions=None):
+               conditions=None, pinode=None):
     """
     Function to set a policy.
     If the policy with this name already exists, it updates the policy.
@@ -1108,6 +1143,7 @@ def set_policy(name=None, scope=None, action=None, realm=None, resolver=None,
         checked with this policy
     :type check_all_resolvers: bool
     :param conditions: A list of 5-tuples (section, key, comparator, value, active) of policy conditions
+    :param pinode: A privacyIDEA node or a list of privacyIDEA nodes.
     :return: The database ID od the the policy
     :rtype: int
     """
@@ -1141,6 +1177,8 @@ def set_policy(name=None, scope=None, action=None, realm=None, resolver=None,
         resolver = ", ".join(resolver)
     if type(client) == list:
         client = ", ".join(client)
+    if type(pinode) == list:
+        pinode = ", ".join(pinode)
     # validate conditions parameter
     if conditions is not None:
         for condition in conditions:
@@ -1176,6 +1214,8 @@ def set_policy(name=None, scope=None, action=None, realm=None, resolver=None,
             p1.time = time
         if priority is not None:
             p1.priority = priority
+        if pinode is not None:
+            p1.pinode = pinode
         p1.active = active
         p1.check_all_resolvers = check_all_resolvers
         if conditions is not None:
@@ -1190,7 +1230,7 @@ def set_policy(name=None, scope=None, action=None, realm=None, resolver=None,
                      resolver=resolver, adminrealm=adminrealm,
                      adminuser=adminuser, priority=priority,
                      check_all_resolvers=check_all_resolvers,
-                     conditions=conditions).save()
+                     conditions=conditions, pinode=pinode).save()
     return ret
 
 
@@ -1274,6 +1314,7 @@ def import_policies(file_contents):
                          user=ast.literal_eval(policy.get("user", "[]")),
                          resolver=ast.literal_eval(policy.get("resolver", "[]")),
                          client=ast.literal_eval(policy.get("client", "[]")),
+                         pinode=ast.literal_eval(policy.get("pinode", "[]")),
                          time=policy.get("time", ""),
                          priority=policy.get("priority", "1")
                          )
@@ -1928,6 +1969,11 @@ def get_static_policy_definitions(scope=None):
                 'desc': _("If there are several different challenges, this text follows the list"
                           " of the challenge texts.")
             },
+            ACTION.CHANGE_PIN_VIA_VALIDATE: {
+                'type': 'bool',
+                'desc': _("If the PIN of a token is to be changed, this will allow the user to change the "
+                          "PIN during a validate/check request via challenge / response."),
+            },
             ACTION.PASSTHRU: {
                 'type': 'str',
                 'value': radiusconfigs,
@@ -1974,78 +2020,118 @@ def get_static_policy_definitions(scope=None):
             }
         },
         SCOPE.AUTHZ: {
+            ACTION.AUTHORIZED: {
+                'type': 'str',
+                'desc': _("Allow the user to authenticate (default). If set to '{0!s}', "
+                          "the authentication of the user will be denied.").format(AUTHORIZED.DENY),
+                'value': [AUTHORIZED.ALLOW, AUTHORIZED.DENY],
+                'group': GROUP.MODIFYING_RESPONSE,
+            },
+            ACTION.APPLICATION_TOKENTYPE: {
+                'type': 'bool',
+                'desc': _("Allow the application to choose which token types should be used "
+                          "for authentication. Application may set the parameter 'type' in "
+                          "the request. Works with validate/check, validate/samlcheck and "
+                          "validate/triggerchallenge.")
+            },
             ACTION.AUTHMAXSUCCESS: {
                 'type': 'str',
                 'desc': _("You can specify how many successful authentication "
                           "requests a user is allowed to do in a given time. "
                           "Specify like 1/5s, 2/10m, 10/1h - s, m, h being "
-                          "second, minute and hour.")
+                          "second, minute and hour."),
+                'group': GROUP.CONDITIONS,
             },
             ACTION.AUTHMAXFAIL: {
                 'type': 'str',
                 'desc': _("You can specify how many failed authentication "
                           "requests a user is allowed to do in a given time. "
                           "Specify like 1/5s, 2/10m, 10/1h - s, m, h being "
-                          "second, minute and hour.")
+                          "second, minute and hour."),
+                'group': GROUP.CONDITIONS,
             },
             ACTION.LASTAUTH: {
                 'type': 'str',
                 'desc': _("You can specify in which time frame the user needs "
                           "to authenticate again with this token. If the user "
                           "authenticates later, authentication will fail. "
-                          "Specify like 30h, 7d or 1y.")
+                          "Specify like 30h, 7d or 1y."),
+                'group': GROUP.CONDITIONS,
             },
             ACTION.TOKENTYPE: {
                 'type': 'str',
                 'desc': _('The user will only be authenticated with this '
-                          'very tokentype.')},
+                          'very tokentype.'),
+                'group': GROUP.CONDITIONS,
+            },
+
             ACTION.SERIAL: {
                 'type': 'str',
                 'desc': _('The user will only be authenticated if the serial '
-                          'number of the token matches this regexp.')},
+                          'number of the token matches this regexp.'),
+                'group': GROUP.CONDITIONS,
+            },
             ACTION.TOKENINFO: {
                 'type': 'str',
                 'desc': _("The user will only be authenticated if the tokeninfo "
-                          "field matches the regexp. key/<regexp>/")},
+                          "field matches the regexp. key/<regexp>/"),
+                'group': GROUP.CONDITIONS,
+            },
             ACTION.SETREALM: {
                 'type': 'str',
                 'value': realms,
                 'desc': _('The Realm of the user is set to this very realm. '
                           'This is important if the user is not contained in '
-                          'the default realm and can not pass his realm.')},
+                          'the default realm and can not pass his realm.'),
+                'group': GROUP.SETTING_ACTIONS,
+            },
             ACTION.NODETAILSUCCESS: {
                 'type': 'bool',
                 'desc': _('In case of successful authentication additional '
-                          'no detail information will be returned.')},
+                          'no detail information will be returned.'),
+                'group': GROUP.SETTING_ACTIONS,
+            },
             ACTION.NODETAILFAIL: {
                 'type': 'bool',
                 'desc': _('In case of failed authentication additional '
-                          'no detail information will be returned.')},
+                          'no detail information will be returned.'),
+                'group': GROUP.SETTING_ACTIONS,
+            },
             ACTION.ADDUSERINRESPONSE: {
                 'type': 'bool',
                 'desc': _('In case of successful authentication user data '
                           'will be added in the detail branch of the '
-                          'authentication response.')},
+                          'authentication response.'),
+                'group': GROUP.SETTING_ACTIONS,
+            },
             ACTION.ADDRESOLVERINRESPONSE: {
                 'type': 'bool',
                 'desc': _('In case of successful authentication the user resolver and '
                           'realm will be added in the detail branch of the '
-                          'authentication response.')},
+                          'authentication response.'),
+                'group': GROUP.SETTING_ACTIONS,
+            },
             ACTION.APIKEY: {
                 'type': 'bool',
                 'desc': _('The sending of an API Auth Key is required during'
                           'authentication. This avoids rogue authenticate '
-                          'requests against the /validate/check interface.')
+                          'requests against the /validate/check interface.'),
+                'group': GROUP.SETTING_ACTIONS,
             }
         },
 
         SCOPE.WEBUI: {
+            ACTION.ADMIN_DASHBOARD: {
+                'type': 'bool',
+                'desc': _('If set, administrators will see a dashboard as start screen '
+                          'when logging in to privacyIDEA WebUI.')
+            },
             ACTION.LOGINMODE: {
                 'type': 'str',
                 'desc': _(
                     'If set to "privacyIDEA" the users and admins need to '
                     'authenticate against privacyIDEA when they log in '
-                    'to the Web UI. Defaults to "userstore"'),
+                    'to the Web UI. Defaults to "userstore".'),
                 'value': [LOGINMODE.USERSTORE, LOGINMODE.PRIVACYIDEA,
                           LOGINMODE.DISABLE],
             },
@@ -2253,6 +2339,7 @@ class Match(object):
     def __init__(self, g, **kwargs):
         self._g = g
         self._match_kwargs = kwargs
+        self.pinode = get_privacyidea_node()
 
     def policies(self, write_to_audit_log=True):
         """
@@ -2270,7 +2357,7 @@ class Match(object):
         else:
             request_headers = None
         return self._g.policy_object.match_policies(audit_data=audit_data, request_headers=request_headers,
-                                                    **self._match_kwargs)
+                                                    pinode=self.pinode, **self._match_kwargs)
 
     def any(self, write_to_audit_log=True):
         """
@@ -2386,6 +2473,34 @@ class Match(object):
                    sort_by_priority=True)
 
     @classmethod
+    def token(cls, g, scope, action, token_obj):
+        """
+        Match active policies with a scope, an action and a token object.
+        The client IP is matched implicitly.
+        From the token object we try to determine the user as the owner.
+        If the token has no owner, we try to determine the tokenrealm.
+        We fallback to realm=None
+        :param g: context object
+        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin`` must be used instead.
+        :param action: the policy action
+        :param token_obj: The token where the user object or the realm should match.
+        :rtype: ``Match``
+        """
+        if token_obj.user:
+            return cls.user(g, scope, action, token_obj.user)
+        else:
+            realms = token_obj.get_realms()
+            if len(realms) == 0:
+                return cls.action_only(g, scope, action)
+            elif len(realms) == 1:
+                # We have one distinct token realm
+                log.debug("Matching policies with tokenrealm {0!s}.".format(realms[0]))
+                return cls.realm(g, scope, action, realms[0])
+            else:
+                log.warning("The token has more than one tokenrealm. Probably not able to match correctly.")
+                return cls.action_only(g, scope, action)
+
+    @classmethod
     def admin(cls, g, action, user_obj=None):
         """
         Match admin policies with an action and, optionally, a realm.
@@ -2460,3 +2575,49 @@ class Match(object):
                    client=client, action=action, adminrealm=adminrealm,
                    adminuser=adminuser, time=time,
                    sort_by_priority=sort_by_priority)
+
+
+def check_pin(g, pin, tokentype, user_obj):
+    """
+    get the policies for minimum length, maximum length and PIN contents
+    first try to get a token specific policy - otherwise fall back to
+    default policy.
+
+    Raises an exception, if the PIN does not comply to the policies.
+
+    :param g:
+    :param pin:
+    :param tokentype:
+    :param user_obj:
+    """
+    pol_minlen = Match.admin_or_user(g, action="{0!s}_{1!s}".format(tokentype, ACTION.OTPPINMINLEN),
+                                     user_obj=user_obj).action_values(unique=True)
+    if not pol_minlen:
+        pol_minlen = Match.admin_or_user(g, action=ACTION.OTPPINMINLEN,
+                                         user_obj=user_obj).action_values(unique=True)
+    pol_maxlen = Match.admin_or_user(g, action="{0!s}_{1!s}".format(tokentype, ACTION.OTPPINMAXLEN),
+                                     user_obj=user_obj).action_values(unique=True)
+    if not pol_maxlen:
+        pol_maxlen = Match.admin_or_user(g, action=ACTION.OTPPINMAXLEN,
+                                         user_obj=user_obj).action_values(unique=True)
+    pol_contents = Match.admin_or_user(g, action="{0!s}_{1!s}".format(tokentype, ACTION.OTPPINCONTENTS),
+                                       user_obj=user_obj).action_values(unique=True)
+    if not pol_contents:
+        pol_contents = Match.admin_or_user(g, action=ACTION.OTPPINCONTENTS,
+                                           user_obj=user_obj).action_values(unique=True)
+
+    if len(pol_minlen) == 1 and len(pin) < int(list(pol_minlen)[0]):
+        # check the minimum length requirement
+        raise PolicyError("The minimum OTP PIN length is {0!s}".format(
+            list(pol_minlen)[0]))
+
+    if len(pol_maxlen) == 1 and len(pin) > int(list(pol_maxlen)[0]):
+        # check the maximum length requirement
+        raise PolicyError("The maximum OTP PIN length is {0!s}".format(
+            list(pol_maxlen)[0]))
+
+    if len(pol_contents) == 1:
+        # check the contents requirement
+        r, comment = check_pin_contents(pin, list(pol_contents)[0])
+        if r is False:
+            raise PolicyError(comment)

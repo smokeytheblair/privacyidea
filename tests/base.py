@@ -11,6 +11,7 @@ from privacyidea.lib.realm import (set_realm)
 from privacyidea.lib.user import User
 from privacyidea.lib.auth import create_db_admin
 from privacyidea.lib.auditmodules.base import Audit
+from privacyidea.lib.lifecycle import call_finalizers
 
 
 PWFILE = "tests/testdata/passwords"
@@ -143,8 +144,33 @@ class MyTestCase(unittest.TestCase):
         expected = "User(login='root', realm='realm3', resolver='reso3')"
         self.assertTrue(user_repr == expected, user_repr)
 
+    def setUp_sqlite_resolver_realm(self, sqlite_file, realm):
+        parameters = {'resolver': "sqlite_resolver",
+                      "type": "sqlresolver",
+                      'Driver': 'sqlite',
+                      'Server': '/tests/testdata/',
+                      'Database': sqlite_file,
+                      'Table': 'users',
+                      'Encoding': 'utf8',
+                      'Editable': True,
+                      'Map': """{ "username": "username",
+                        "userid" : "id",
+                        "email" : "email",
+                        "surname" : "name",
+                        "givenname" : "givenname",
+                        "password" : "password",
+                        "phone": "phone",
+                        "mobile": "mobile"}"""
+                      }
+        r = save_resolver(parameters)
+        self.assertTrue(r)
+        success, fail = set_realm(realm, ["sqlite_resolver"])
+        self.assertEqual(len(success), 1)
+        self.assertEqual(len(fail), 0)
+
     @classmethod
     def tearDownClass(cls):
+        call_finalizers()
         db.session.remove()
         db.drop_all()
         cls.app_context.pop()

@@ -33,12 +33,14 @@ The SQL Audit Module is configured like this:
     Optional:
     PI_AUDIT_SQL_URI = "sqlite://"
     PI_AUDIT_SQL_TRUNCATE = True | False
+    PI_AUDIT_SQL_COLUMN_LENGTH = {"user": 60, "info": 10 ...}
 
 If the PI_AUDIT_SQL_URI is omitted the Audit data is written to the
 token database.
 """
 
 import logging
+from collections import OrderedDict
 from privacyidea.lib.auditmodules.base import (Audit as AuditBase, Paginate)
 from privacyidea.lib.crypto import Sign
 from privacyidea.lib.pooling import get_engine
@@ -85,7 +87,7 @@ class Audit(AuditBase):
     """
 
     is_readable = True
-    
+
     def __init__(self, config=None):
         super(Audit, self).__init__(config)
         self.name = "sqlaudit"
@@ -96,7 +98,11 @@ class Audit(AuditBase):
             self.read_keys(self.config.get("PI_AUDIT_KEY_PUBLIC"),
                            self.config.get("PI_AUDIT_KEY_PRIVATE"))
             self.sign_object = Sign(self.private, self.public)
-
+        # Read column_length from the config file
+        config_column_length = self.config.get("PI_AUDIT_SQL_COLUMN_LENGTH", {})
+        # fill the missing parts with the default from the models
+        self.custom_column_length = {k: (v if k not in config_column_length else config_column_length[k])
+                                     for k, v in column_length.items()}
         # We can use "sqlaudit" as the key because the SQLAudit connection
         # string is fixed for a running privacyIDEA instance.
         # In other words, we will not run into any problems with changing connect strings.
@@ -108,7 +114,7 @@ class Audit(AuditBase):
         self.session = Session()
         # Ensure that the connection gets returned to the pool when the request has
         # been handled. This may close an already-closed session, but this is not a problem.
-        register_finalizer(self.session.close)
+        register_finalizer(self._finalize_session)
         self.session._model_changes = {}
 
     def _create_engine(self):
@@ -133,12 +139,17 @@ class Audit(AuditBase):
             log.debug("Using no SQL pool_size.")
         return engine
 
+    def _finalize_session(self):
+        """ Close current session and dispose connections of db engine"""
+        self.session.close()
+        self.engine.dispose()
+
     def _truncate_data(self):
         """
-        Truncate self.audit_data according to the column_length.
+        Truncate self.audit_data according to the self.custom_column_length.
         :return: None
         """
-        for column, l in column_length.items():
+        for column, l in self.custom_column_length.items():
             if column in self.audit_data:
                 data = self.audit_data[column]
                 if isinstance(data, string_types):
@@ -206,10 +217,10 @@ class Audit(AuditBase):
         # if param contains search filters, we build the search filter
         # to only return the number of those entries
         filter_condition = self._create_filter(param, timelimit=timelimit)
-        
+
         try:
-            count = self.session.query(LogEntry.id)\
-                .filter(filter_condition)\
+            count = self.session.query(LogEntry.id) \
+                .filter(filter_condition) \
                 .count()
         finally:
             self.session.close()
@@ -221,7 +232,7 @@ class Audit(AuditBase):
         It should hash the data and do a hash chain and sign the data
         """
         try:
-            self.audit_data["policies"] = ",".join(self.audit_data.get("policies",[]))
+            self.audit_data["policies"] = ",".join(self.audit_data.get("policies", []))
             if self.config.get("PI_AUDIT_SQL_TRUNCATE"):
                 self._truncate_data()
             if "tokentype" in self.audit_data:
@@ -297,7 +308,7 @@ class Audit(AuditBase):
         finally:
             # self.session.close()
             pass
-            
+
         return res
 
     @staticmethod
@@ -370,9 +381,7 @@ class Audit(AuditBase):
 
         for le in logentries:
             audit_dict = self.audit_entry_to_dict(le)
-            audit_list = list(audit_dict.values())
-            string_list = [u"'{0!s}'".format(x) for x in audit_list]
-            yield ",".join(string_list)+"\n"
+            yield u",".join([u"'{0!s}'".format(x) for x in audit_dict.values()]) + u"\n"
 
     def get_count(self, search_dict, timedelta=None, success=None):
         # create filter condition
@@ -430,7 +439,7 @@ class Audit(AuditBase):
                 log.debug("{0!s}".format(traceback.format_exc()))
 
         return paging_object
-        
+
     def search_query(self, search_dict, page_size=15, page=1, sortorder="asc",
                      sortname="number", timelimit=None):
         """
@@ -444,7 +453,7 @@ class Audit(AuditBase):
         try:
             limit = int(page_size)
             offset = (int(page) - 1) * limit
-            
+
             # create filter condition
             filter_condition = self._create_filter(search_dict,
                                                    timelimit=timelimit)
@@ -459,7 +468,7 @@ class Audit(AuditBase):
                     filter_condition).order_by(
                     asc(self._get_logentry_attribute("number"))).limit(
                     limit).offset(offset)
-                                         
+
         except Exception as exx:  # pragma: no cover
             log.error("exception {0!r}".format(exx))
             log.debug("{0!s}".format(traceback.format_exc()))
@@ -480,7 +489,7 @@ class Audit(AuditBase):
         """
         self.session.query(LogEntry).delete()
         self.session.commit()
-    
+
     def audit_entry_to_dict(self, audit_entry):
         sig = None
         if self.sign_data:
@@ -497,24 +506,24 @@ class Audit(AuditBase):
 
         is_not_missing = self._check_missing(int(audit_entry.id))
         # is_not_missing = True
-        audit_dict = {'number': audit_entry.id,
-                      'date': audit_entry.date.isoformat(),
-                      'sig_check': "OK" if sig else "FAIL",
-                      'missing_line': "OK" if is_not_missing else "FAIL",
-                      'action': audit_entry.action,
-                      'success': audit_entry.success,
-                      'serial': audit_entry.serial,
-                      'token_type': audit_entry.token_type,
-                      'user': audit_entry.user,
-                      'realm': audit_entry.realm,
-                      'resolver': audit_entry.resolver,
-                      'administrator': audit_entry.administrator,
-                      'action_detail': audit_entry.action_detail,
-                      'info': audit_entry.info,
-                      'privacyidea_server': audit_entry.privacyidea_server,
-                      'policies': audit_entry.policies,
-                      'client': audit_entry.client,
-                      'log_level': audit_entry.loglevel,
-                      'clearance_level': audit_entry.clearance_level
-                      }
+        audit_dict = OrderedDict()
+        audit_dict['number'] = audit_entry.id
+        audit_dict['date'] = audit_entry.date.isoformat()
+        audit_dict['sig_check'] = "OK" if sig else "FAIL"
+        audit_dict['missing_line'] = "OK" if is_not_missing else "FAIL"
+        audit_dict['action'] = audit_entry.action
+        audit_dict['success'] = audit_entry.success
+        audit_dict['serial'] = audit_entry.serial
+        audit_dict['token_type'] = audit_entry.token_type
+        audit_dict['user'] = audit_entry.user
+        audit_dict['realm'] = audit_entry.realm
+        audit_dict['resolver'] = audit_entry.resolver
+        audit_dict['administrator'] = audit_entry.administrator
+        audit_dict['action_detail'] = audit_entry.action_detail
+        audit_dict['info'] = audit_entry.info
+        audit_dict['privacyidea_server'] = audit_entry.privacyidea_server
+        audit_dict['policies'] = audit_entry.policies
+        audit_dict['client'] = audit_entry.client
+        audit_dict['log_level'] = audit_entry.loglevel
+        audit_dict['clearance_level'] = audit_entry.clearance_level
         return audit_dict

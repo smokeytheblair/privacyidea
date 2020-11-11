@@ -1,6 +1,28 @@
 # Update Notes
 
+## Update from 3.3 to 3.4
+
+* Policies can now contain the privacyIDEA node as condition.
+
+  Be sure to run the schema updates in you pip installation.
+  Ubuntu or CentOS installations will run the schema update automatically.
+
+* The SMS Gateway database tables have been enhanced with an additional
+  constraint on the type of the options.
+
+  The data in the column "Type" of the database table "smsgatewayoption"
+  will be migrated by the schema update script.
+  If you are using SMS Gateways, check your gateway configurtion
+  after the update.
+
 ## Update from 3.2 to 3.3
+
+* Admin policies now do have a destinct admin username field.
+
+  The normal username field will not be used for the admin user
+  anymore but can be used for normal users.
+  The SQL migration script migrates existing admin policies by moving
+  the usernames of administrators to the new username field.
 
 * PostgreSQL database adapter removed from default installation
 
@@ -14,14 +36,21 @@
   If you added your own tokenclass, please assure to update
   your function signature.
 
+* Output of Logger Audit changed
+
+  The log-message of the Logger Audit is now converted to a JSON-encoded string
+  sorted by keywords. This could potentially mess up subsequent reporting
+  configurations.
+
 * Update of some HTML templates due to update of UI components
 
-  Some HTML templates changed and might render custom templates unusable. Please check
-  your custom templates and compare to these changes:
-   - ``components/views/component.subscriptions.html`` (File upload changed)
-   - ``config/views/*.html`` (switch ``pattern`` to ``ng-pattern`` to avoid error message in
-    console)
-   - ``token/views/token.import.html`` (File upload and progress variable changed)
+  Several HTML templates have changed and might render custom templates unusable.
+  Please check your custom templates and compare to these changes:
+   - File upload component changed
+   - Switch ``pattern`` to ``ng-pattern`` to avoid error message in console
+   - Accordion component changed
+   - Pagination component changed
+   - Tooltip component changed
 
 ## Update from 3.1 to 3.2
 

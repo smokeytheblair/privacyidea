@@ -186,7 +186,7 @@ class LocalCATestCase(MyTestCase):
             try:
                 os.remove("{0!s}/{1!s}".format(WORKINGDIR, f))
             except OSError:
-                print("File {1!s} could not be deleted.".format(f))
+                print("File {0!s} could not be deleted.".format(f))
 
         # restore backup of index.txt and serial
         shutil.copyfile("{0!s}/serial.orig".format(WORKINGDIR),
@@ -324,6 +324,10 @@ class LocalCATestCase(MyTestCase):
         self.assertTrue(ddiff.days > 740, ddiff.days)
         self.assertTrue(ddiff.days < 760, ddiff.days)
 
+        # in case of a nonexistent template file, no exception is raised
+        # but an empty value is returned
+        cacon.template_file = "nonexistent"
+        self.assertEquals(cacon.get_templates(), {})
 
 class CreateLocalCATestCase(MyTestCase):
     """

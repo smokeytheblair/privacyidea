@@ -35,7 +35,7 @@ angular.module("privacyideaApp")
                                       PolicyTemplateFactory, gettextCatalog,
                                       hotkeys, RegisterFactory,
                                       U2fFactory, webAuthnToken, instanceUrl,
-                                      PollingAuthFactory,
+                                      PollingAuthFactory, $transitions,
                                       resourceNamePatterns) {
 
     $scope.instanceUrl = instanceUrl;
@@ -44,6 +44,7 @@ angular.module("privacyideaApp")
     $scope.checkMainMenu = AuthFactory.checkMainMenu;
     $scope.checkEnroll = AuthFactory.checkEnroll;
     $scope.inputNamePatterns = resourceNamePatterns;
+    $scope.startRoute = "/token";
     var obj = angular.element(document.querySelector("#REMOTE_USER"));
     $scope.remoteUser = obj.val();
     if (!$scope.remoteUser) {
@@ -65,7 +66,13 @@ angular.module("privacyideaApp")
     obj = angular.element(document.querySelector('#HAS_JOB_QUEUE'));
     $scope.hasJobQueue = obj.val() == "True";
     obj = angular.element(document.querySelector('#LOGIN_TEXT'));
-    $scope.piLoginText= obj.val();
+    $scope.piLoginText = obj.val();
+    obj = angular.element(document.querySelector('#PI_TRANSLATION_WARNING'));
+    $scope.piTranslationWarning = obj.val() !== "False";
+    $scope.piTranslationPrefix = obj.val();
+    gettextCatalog.debug = $scope.piTranslationWarning;
+    gettextCatalog.debugPrefix = $scope.piTranslationPrefix;
+
     // Check if registration is allowed
     $scope.registrationAllowed = false;
     RegisterFactory.status(function (data) {
@@ -102,19 +109,18 @@ angular.module("privacyideaApp")
     $scope.myCountdown = "";
     // We save the previous State in the $rootScope, so that we
     // can return there
-    $rootScope.$on('$stateChangeSuccess',
-        function (ev, to, toParams, from, fromParams) {
-            //debug: console.log("we changed the state from " + from + " to " + to);
-            //debug: console.log(from);
-            //debug: console.log(fromParams);
-            //debug: console.log(to);
+    $transitions.onBefore({},
+        function () {
+            // The stateParams or $state.params are always changed as a reference.
+            // So we need to do a deep copy, to preserve it between state transitions
+            var oldParams = {};
+            angular.copy($state.params, oldParams);
             $rootScope.previousState = {
-                state: from.name,
-                params: fromParams
+                state: $state.current.name,
+                params: oldParams
             };
-
-            $scope.checkReloadListeners();
         });
+
     $scope.$on('IdleStart', function () {
         //debug: console.log("start idle");
     });
@@ -199,8 +205,12 @@ angular.module("privacyideaApp")
         }, {
             withCredentials: true
         }).then(function (response) {
+            // successful authentication
             $scope.do_login_stuff(response.data);
+            // login data is not needed anymore, remove from scope
+            $scope.login = {username: "", password: ""};
         }, function (response) {
+            // failed auth request (may be challenge-response)
             //debug: console.log("challenge response");
             //debug: console.log(error);
             let error = response.data;
@@ -222,7 +232,7 @@ angular.module("privacyideaApp")
                 $scope.webAuthnSignRequests = [];
                 $scope.transactionid = error.detail["transaction_id"];
 
-                // Challenge Response always containes mult_challenge!
+                // Challenge Response always contains multi_challenge!
                 var multi_challenge = error.detail.multi_challenge;
                 if (multi_challenge.length > 1) {
                     $scope.challenge_message = gettextCatalog.getString('Please confirm with one of these tokens:');
@@ -291,7 +301,6 @@ angular.module("privacyideaApp")
                     inform.add(gettextCatalog.getString("Challenge Response " +
                             "Authentication. Your response was not valid!"),
                         {type: "warning", ttl: 5000});
-                    $scope.login.password = "";
                     // in case of U2F we try for a 2nd signature
                     // In case of u2f we do:
                     if ($scope.u2f_first_error) {
@@ -322,12 +331,7 @@ angular.module("privacyideaApp")
                             {type: "danger", ttl: 10000});
                 }
             }
-        }).finally(function () {
-            // We delete the login object, so that the password is not
-            // contained in the scope
-            $scope.login = {username: "", password: ""};
-            }
-        );
+        });
     };
     $scope.check_authentication = function() {
         // This function is used to poll, if a challenge response
@@ -377,18 +381,39 @@ angular.module("privacyideaApp")
             if ($scope.dialogNoToken) {
                 $('#dialogNoToken').modal("show");
             }
-            $scope.qr_image_android = data.result.value.qr_image_android || "";
-            $scope.qr_image_ios = data.result.value.qr_image_ios || "";
-            $scope.qr_image_custom = data.result.value.qr_image_custom || "";
-            // This is a helper variable to get the number of qr images to display
-            $scope.qr_image_count = Number($scope.qr_image_android.length > 0)
-                + Number($scope.qr_image_ios.length > 0)
-                + Number($scope.qr_image_custom.length > 0);
+            $scope.qr_images = [];
+            if ( data.result.value.qr_image_android ) {
+                $scope.qr_images.push({
+                    'src': data.result.value.qr_image_android,
+                    'alt': 'QR-Code with link to android app in play store',
+                    'help': gettextCatalog.getString('Get the Authenticator App for Android.')})
+            }
+            if ( data.result.value.qr_image_ios ) {
+                $scope.qr_images.push({
+                    'src': data.result.value.qr_image_ios,
+                    'alt': 'QR-Code with link to iOS app in app store',
+                    'help': gettextCatalog.getString('Get the Authenticator App for iOS.')})
+            }
+            if ( data.result.value.qr_image_custom ) {
+                $scope.qr_images.push({
+                    'src': data.result.value.qr_image_custom,
+                    'alt': 'QR-Code with link to a custom app',
+                    'help': gettextCatalog.getString('Get the Authenticator App.')})
+            }
+            if ($scope.qr_images.length > 0) {
+                $scope.qr_col_md = "col-md-" + parseInt(12 / $scope.qr_images.length);
+            }
             $scope.token_page_size = data.result.value.token_page_size;
             $scope.user_page_size = data.result.value.user_page_size;
             $scope.user_details_in_tokenlist = data.result.value.user_details;
             $scope.default_tokentype = data.result.value.default_tokentype;
             $scope.timeout_action = data.result.value.timeout_action;
+            $scope.admin_dashboard = data.result.value.admin_dashboard;
+            if ($scope.admin_dashboard) {
+                $scope.startRoute = "/dashboard";
+            } else {
+                $scope.startRoute = "/token";
+            }
             $scope.hide_welcome = data.result.value.hide_welcome;
             $scope.hide_buttons = data.result.value.hide_buttons;
             $scope.show_seed = data.result.value.show_seed;
@@ -410,11 +435,43 @@ angular.module("privacyideaApp")
             Idle.watch();
             //debug: console.log("successfully authenticated");
             //debug: console.log($scope.loggedInUser);
+            if ($scope.loggedInUser.role === "admin") {
+            /*
+            * Functions to check and to create a default realm.
+            */
+                ConfigFactory.getRealms(function (data) {
+                    // Check if there is a realm defined, or if we should display the
+                    // Auto Create Dialog
+                    var number_of_realms = Object.keys(data.result.value).length;
+                    if (number_of_realms === 0) {
+                        $('#dialogAutoCreateRealm').modal();
+                    }
+                });
+                /*
+                 Welcome dialog, which displays a lot of information to the
+                 administrator.
+
+                 We display it if
+                 subscription_state = 0 and hide_welcome = false
+                 subscription_state = 1
+                 subscription_state = 2
+                 */
+                $scope.resetWelcome();
+                if (($scope.welcomeStep < 4 && !$scope.hide_welcome) || $scope.welcomeStep < 5) {
+                    // We did not walk through the welcome dialog, yet.
+                    if (($scope.subscription_state === 0 && !$scope.hide_welcome) ||
+                        ($scope.subscription_state === 1)) {
+                        $('#dialogWelcome').modal("show");
+                    }
+                }
+                var $random_number = Math.floor(Math.random() * (9999 + 1000 + 1)) + 1000;
+                $scope.class_subscription_expired = "subscriptionExpired" + $random_number;
+            }
             if ( $scope.unlocking ) {
                 $('#dialogLock').modal('hide');
             } else {
-                // if we are unlocking we do NOT go to the tokens
-                $location.path("/token");
+                // if we login anew, we either go to the token or to the dashboard
+                $location.path($scope.startRoute);
             }
 
             //inform.add(gettextCatalog.getString("privacyIDEA UI supports " +
@@ -429,7 +486,7 @@ angular.module("privacyideaApp")
         $scope.privacyideaVersionNumber = null;
         $scope.logoutWarning = false;
         $scope.myCountdown = "";
-        $scope.welcomeStep = 0;
+        $scope.resetWelcome();
         $scope.dialogNoToken = false;
         $scope.privacyideaSupportLink = $rootScope.publicLink;
         $state.go("login");
@@ -440,12 +497,18 @@ angular.module("privacyideaApp")
 
     $scope.nextWelcome = function() {
         $scope.welcomeStep += 1;
-        if ($scope.welcomeStep === 4) {
+        if (($scope.subscription_state == 0 && $scope.welcomeStep === 4) ||
+            ($scope.subscription_state == 1 && $scope.welcomeStep === 5)) {
             $('#dialogWelcome').modal("hide");
         }
     };
     $scope.resetWelcome = function() {
-        $scope.welcomeStep = 0;
+        if ($scope.hide_welcome) {
+            $scope.welcomeStep = 4;
+        } else {
+            $scope.welcomeStep = 0;
+        }
+
     };
 
     $scope.closeNoToken = function() {
@@ -456,7 +519,7 @@ angular.module("privacyideaApp")
     $scope.lock_screen = function () {
         // We need to destroy the auth_token
         $scope.loggedInUser.auth_token = null;
-        $scope.welcomeStep = 0;
+        $scope.resetWelcome();
         Idle.unwatch();
         $('#dialogLock').modal({
             keyboard: false,
@@ -506,24 +569,6 @@ angular.module("privacyideaApp")
     $scope.reload = function() {
         // emit a signal to the scope, that just listens
         $scope.$broadcast("piReload");
-    };
-
-    $scope.checkReloadListeners = function () {
-        /*
-         TODO: The a logic, that can hide the reload button.
-         This is not straighforward, since the current number of connected
-         listeners might be confusing:
-
-         connected numbers:
-         var currentListeners = $scope.$$listenerCount["piReload"];
-
-         When the state changes, the scope and thus the current listener is
-         destroyed. But the statechange-success is called, before the scope
-         is destroyed, so there can be two connected listeners, when
-         changing from a state to another state and both have a listener
-         defined.
-        */
-        $scope.reloadListeners = 1;
     };
 
 });

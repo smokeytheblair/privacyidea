@@ -1,5 +1,8 @@
 import os
 import logging
+import random
+import string
+log = logging.getLogger(__name__)
 basedir = os.path.abspath(os.path.dirname(__file__))
 basedir = "/".join(basedir.split("/")[:-1]) + "/"
 
@@ -25,6 +28,16 @@ WQIDAQAB
 -----END PUBLIC KEY-----
 """
 
+
+def _random_password(size):
+    log.info("SECRET_KEY not set in config. Generating a random key.")
+    passwd = [random.choice(string.ascii_lowercase + \
+                            string.ascii_uppercase + string.digits) for _x in range(size)]
+    # return shuffled password
+    random.shuffle(passwd)
+    return "".join(passwd)
+
+
 class Config(object):
     SECRET_KEY = os.environ.get('SECRET_KEY')
     # SQL_ALCHEMY_DATABASE_URI = "mysql://privacyidea:XmbSrlqy5d4IS08zjz"
@@ -36,7 +49,6 @@ class Config(object):
     PI_AUDIT_KEY_PUBLIC = os.path.join(basedir, "tests/testdata/public.pem")
     PI_LOGFILE = "privacyidea.log"
     PI_LOGLEVEL = logging.INFO
-    PI_LOGLEVEL = 9
     CACHE_TYPE = "simple"
     PI_EXTERNAL_LINKS = True
     SQLALCHEMY_TRACK_MODIFICATIONS = False
@@ -53,6 +65,7 @@ class DevelopmentConfig(Config):
     SQLALCHEMY_DATABASE_URI = os.environ.get('DEV_DATABASE_URL') or \
         'sqlite:///' + os.path.join(basedir, 'data-dev.sqlite')
     PI_LOGLEVEL = logging.DEBUG
+    PI_TRANSLATION_WARNING = "[Missing]"
 
 
 class TestingConfig(Config):
@@ -66,14 +79,13 @@ class TestingConfig(Config):
     PI_PEPPER = ""
     # This is only for testing encrypted files
     PI_ENCFILE_ENC = "tests/testdata/enckey.enc"
-    PI_LOGLEVEL = logging.DEBUG
     PI_LOGLEVEL = logging.INFO
     PI_GNUPG_HOME = "tests/testdata/gpg"
     CACHE_TYPE = "None"
     PI_SCRIPT_HANDLER_DIRECTORY = "tests/testdata/scripts/"
     PI_NOTIFICATION_HANDLER_SPOOLDIRECTORY = "tests/testdata/"
     PI_NODE = "Node1"
-    PI_NODES = ["Node2"]
+    PI_NODES = ["Node1", "Node2"]
     PI_ENGINE_REGISTRY_CLASS = "null"
     PI_TRUSTED_JWT = [{"public_key": pubtest_key,
                        "algorithm": "HS256",
@@ -90,31 +102,35 @@ class TestingConfig(Config):
                       {"public_key": pubtest_key,
                        "algorithm": "RS256",
                        "role": "user",
+                       "realm": "realmX",
+                       "resolver": "resolverX",
+                       "username": "h.*s"},
+                      {"public_key": pubtest_key,
+                       "algorithm": "RS256",
+                       "role": "user",
                        "realm": "realm1",
                        "username": "userA",
                        "resolver": "resolverX"}]
 
 
 class ProductionConfig(Config):
-    config_path = basedir
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'sqlite:///' + os.path.join(config_path, 'data.sqlite')
+        'sqlite:///' + os.path.join(basedir, 'data.sqlite')
     #SQLALCHEMY_DATABASE_URI = "mysql://pi2:pi2@localhost/pi2"
     # This is used to encrypt the auth_token
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 't0p s3cr3t'
+    SECRET_KEY = os.environ.get('SECRET_KEY') or _random_password(24)
     # This is used to encrypt the admin passwords
     PI_PEPPER = "Never know..."
     # This is used to encrypt the token data and token passwords
-    PI_ENCFILE = os.path.join(config_path, "enckey")
+    PI_ENCFILE = os.path.join(basedir, "enckey")
     # This is used to sign the audit log
-    PI_AUDIT_KEY_PRIVATE = os.path.join(config_path, "private.pem")
-    PI_AUDIT_KEY_PUBLIC = os.path.join(config_path, "public.pem")
+    PI_AUDIT_KEY_PRIVATE = os.path.join(basedir, "private.pem")
+    PI_AUDIT_KEY_PUBLIC = os.path.join(basedir, "public.pem")
     PI_LOGLEVEL = logging.INFO
     SUPERUSER_REALM = ['superuser']
 
 
 class HerokuConfig(Config):
-    config_path = basedir
     SQLALCHEMY_DATABASE_URI = "postgres://mvfkmtkwzuwojj:" \
                               "wqy_btZE3CPPNWsmkfdmeorxy6@" \
                               "ec2-54-83-0-61.compute-1." \
@@ -125,11 +141,11 @@ class HerokuConfig(Config):
     # This is used to encrypt the admin passwords
     PI_PEPPER = "Never know..."
     # This is used to encrypt the token data and token passwords
-    PI_ENCFILE = os.path.join(config_path, "deploy/heroku/enckey")
+    PI_ENCFILE = os.path.join(basedir, "deploy/heroku/enckey")
     # This is used to sign the audit log
-    PI_AUDIT_KEY_PRIVATE = os.path.join(config_path,
+    PI_AUDIT_KEY_PRIVATE = os.path.join(basedir,
                                         "deploy/heroku/private.pem")
-    PI_AUDIT_KEY_PUBLIC = os.path.join(config_path, "deploy/heroku/public.pem")
+    PI_AUDIT_KEY_PUBLIC = os.path.join(basedir, "deploy/heroku/public.pem")
     SUPERUSER_REALM = ['superuser']
 
 

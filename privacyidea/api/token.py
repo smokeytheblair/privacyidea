@@ -358,6 +358,7 @@ def list_api():
     :query sortdir: asc/desc
     :query page: request a certain page
     :query assigned: Only return assigned (True) or not assigned (False) tokens
+    :query active: Only return active (True) or inactive (False) tokens
     :query pagesize: limit the number of returned tokens
     :query user_fields: additional user fields from the userid resolver of
         the owner (user)
@@ -384,8 +385,16 @@ def list_api():
     ufields = getParam(param, "user_fields", optional)
     output_format = getParam(param, "outform", optional)
     assigned = getParam(param, "assigned", optional)
+    active = getParam(param, "active", optional)
+    tokeninfokey = getParam(param, "infokey", optional)
+    tokeninfovalue = getParam(param, "infovalue", optional)
+    tokeninfo = None
+    if tokeninfokey and tokeninfovalue:
+        tokeninfo = {tokeninfokey: tokeninfovalue}
     if assigned:
         assigned = assigned.lower() == "true"
+    if active:
+        active = active.lower() == "true"
     
     user_fields = []
     if ufields:
@@ -399,11 +408,12 @@ def list_api():
     # get list of tokens as a dictionary
     tokens = get_tokens_paginate(serial=serial, realm=realm, page=page,
                                  user=user, assigned=assigned, psize=psize,
-                                 sortby=sort, sortdir=sdir,
+                                 active=active, sortby=sort, sortdir=sdir,
                                  tokentype=tokentype,
                                  resolver=resolver,
                                  description=description,
-                                 userid=userid, allowed_realms=allowed_realms)
+                                 userid=userid, allowed_realms=allowed_realms,
+                                 tokeninfo=tokeninfo)
     g.audit_object.log({"success": True})
     if output_format == "csv":
         return send_csv_result(tokens)

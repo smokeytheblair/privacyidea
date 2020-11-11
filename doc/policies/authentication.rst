@@ -155,10 +155,14 @@ type: string
 This is the text that is sent via SMS to the user trying to
 authenticate with an SMS token.
 You can use the tags *<otp>* and *<serial>*.
+Texts containing whitespaces must be enclosed in single quotes.
 
 Starting with version 2.20 you can use the tag *{challenge}*. This will add
 the challenge data that was passed in the first authentication request in the
 challenge parameter. This could contain banking transaction data.
+
+In the :ref:`sms_gateway_config` the tag *{otp}* will be replaced by the custom
+message, set with this policy.
 
 Default: *<otp>*
 
@@ -182,11 +186,12 @@ emailtext
 type: string
 
 This is the text that is sent via Email to be used with Email Token. This
-text should contain the OTP value.
+text should contain the OTP tag.
 
 The text can contain the following tags, that will be filled:
 
-  * {serial} the serial number of the token.
+  * {otp} or *<otp>* the One-Time-Password
+  * {serial} or *<serial>* the serial number of the token.
   * {user} the given name of the token owner.
   * {givenname} the given name of the token owner.
   * {surname} the surname of the token owner.
@@ -293,6 +298,24 @@ This is a list of token types for which challenge response can
 be used during authentication. The list is separated by whitespaces like
 *"hotp totp"*.
 
+.. _policy_change_pin_via_validate:
+
+change_pin_via_validate
+~~~~~~~~~~~~~~~~~~~~~~~
+
+type: bool
+
+This works with the enrollment policies :ref:`policy_change_pin_first_use` and
+:ref:`policy_change_pin_every`. When a PIN change is due, then a successful authentication
+will start a challenge response mechanism in which the user is supposed to enter a new
+PIN two times.
+
+Only if the user successfully changes the PIN the authentication process is finished
+successfully. E.g. if the user enters two different new PINs, the authentication process will fail.
+
+.. note:: The application must support several consecutive challenge response requests.
+
+
 .. _policy_u2f_facets:
 
 u2f_facets
@@ -305,7 +328,7 @@ also use a U2F device that was registered with privacyIDEA.
 
 You need to specify a list of FQDNs without the https scheme like:
 
-*"host1.example.com host2.exmaple.com firewall.example.com"*
+*"host1.example.com host2.example.com firewall.example.com"*
 
 For more information on configuring U2F see :ref:`u2f_token`.
 
@@ -419,6 +442,39 @@ Sensible numbers might be 10 or 20 seconds.
    the number of available worker threads!
 
 
+.. _policy_auth_push_allow_poll:
+
+push_allow_polling
+~~~~~~~~~~~~~~~~~~
+
+.. index:: push token
+
+type: string
+
+This policy configures if push tokens are allowed to poll the server for open
+challenges (e.g. when the the third-party push service is unavailable or
+unreliable).
+
+The following options are available:
+
+``allow``
+
+    *Allow* push tokens to poll for challenges.
+
+``deny``
+
+    *Deny* push tokens to poll for challenges. This basically returns a ``403``
+    error when requesting the poll endpoint.
+
+``token``
+
+    *Allow* / *Deny* polling based on the individual token. The tokeninfo key
+    ``polling_allowed`` is checked. If the value evaluates to ``False``, polling
+    is denied for this token. If it evaluates to ``True`` or is not set, polling
+    is allowed for this token.
+
+The default is to ``allow`` polling
+
 .. _policy_challenge_text:
 
 challenge_text, challenge_text_header, challenge_test_footer
@@ -468,7 +524,7 @@ a shared secret. The default number to ask is 2.
 The number of requested positions can be changed using this policy.
 
 
-.. _webauthn_authn_allowed_transports:
+.. _policy_webauthn_authn_allowed_transports:
 
 webauthn_allowed_transports
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -482,9 +538,9 @@ limited to USB only using this policy. The allowed transports are given as a
 space-separated list.
 
 The default is to allow all transports (equivalent to a value of `usb ble nfc
-internal lightning`).
+internal`).
 
-.. _webauthn_authn_timeout:
+.. _policy_webauthn_authn_timeout:
 
 webauthn_timeout
 ~~~~~~~~~~~~~~~~
@@ -507,9 +563,9 @@ an arbitrary amount in either direction, or even ignored entirely.
 The default timeout is 60 seconds.
 
 .. note:: If you set this policy you may also want to set
-    :ref:`webauthn_enroll_timeout`.
+    :ref:`policy_webauthn_enroll_timeout`.
 
-.. _webauthn_authn_user_verification_requirement:
+.. _policy_webauthn_authn_user_verification_requirement:
 
 webauthn_user_verification_requirement
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -535,4 +591,17 @@ supported by the token.
     are still quite rare in practice).
 
 .. note:: If you configure this, you will likely also want to configure
-    :ref:`webauthn_enroll_user_verification_requirement`.
+    :ref:`policy_webauthn_enroll_user_verification_requirement`.
+
+
+question_number
+~~~~~~~~~~~~~~~
+
+type: integer
+
+The questionnaire token can ask more than one question during one authentication process.
+It will ask the first question, verify the answer, ask the next question and verify the answer.
+This policy setting defines how many questions the user needs to answer. (default: 1)
+
+.. note:: A question will be asked only once, unless the policy requires more questions to be asked,
+   than the token has available answers.

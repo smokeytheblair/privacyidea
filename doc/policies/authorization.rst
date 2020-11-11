@@ -20,6 +20,30 @@ using :ref:`code_policy` and
 The following actions are available in the scope 
 *authorization*:
 
+.. _authorized_policy:
+
+authorized
+~~~~~~~~~~
+
+This is the basic authorization, that either grants the user access or denies access via the ``/validate``
+endpoints (see :ref:`rest_validate`).
+The default behaviour is to grant access, if and after the user has authenticated successfully.
+
+Using ``authorized=deny_access`` specific authentication requests can be denied, even if the user has provided
+the correct credentials.
+
+In combination with different IP addresses and policy priorities the adminitator can generically *deny_access* with the
+lowest policy priority and *grant_access* for specific requests e.g. originating from specific IP addresses to certain
+users by defining higher policy priorities.
+
+.. note:: Since *authorized* is checked as a *postpolicy* the OTP value used during an authentication attempt
+    will be invalidated even if the *authorized* policy denies the access.
+
+.. note:: The actual "success" of the authentication can be changed to "failed" by this postpolicy.
+    I.e. pre-event handlers
+    (:ref:`eventhandler_pre_and_post`) would still see the request as successful before it would be changed by
+    this policy and match the event handler condition ``result value == True``.
+
 .. _tokentype_policy:
 
 tokentype
@@ -43,6 +67,24 @@ this request
    sensitive areas only with one special token type
    while allowing access to less sensitive areas
    with other token types.
+
+.. _application_tokentype_policy:
+
+application_tokentype
+~~~~~~~~~~~~~~~~~~~~~
+
+type: bool
+
+If this policy is set, an application may add a parameter ``type`` as
+tokentype in the authentication request like ``validate/check``, ``validate/samlcheck``
+or ``validate/triggerchallenge``.
+
+Then the application can determine via this parameter, which tokens of a user
+should be checked.
+
+E.g. when using this in *triggerchallenge*, an application could assure, that only SMS tokens
+are used for authentication.
+
 
 serial
 ~~~~~~
@@ -257,7 +299,7 @@ In case of a successful authentication the resolver and realm of the user are ad
 to the response. The names are added in
 ``detail->user-resolver`` and ``detail->user-realm``.
 
-.. _webauthn_authz_authenticator_selection_list:
+.. _policy_webauthn_authz_authenticator_selection_list:
 
 webauthn_authenticator_selection_list
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -277,9 +319,9 @@ If this action is not configured, all authenticators will be deemed acceptable,
 unless limited through some other action.
 
 .. note:: If you configure this, you will likely also want to configure
-    :ref:`webauthn_enroll_authenticator_selection_list`
+    :ref:`policy_webauthn_enroll_authenticator_selection_list`
 
-.. _webauthn_authz_req:
+.. _policy_webauthn_authz_req:
 
 webauthn_req
 ~~~~~~~~~~~~
@@ -299,4 +341,4 @@ information is fetched from the attestation certificate. Only if the attribute
 in the attestation certificate matches accordingly the token can be enrolled.
 
 .. note:: If you configure this, you will likely also want to configure
-    :ref:`webauthn_enroll_req`
+    :ref:`policy_webauthn_enroll_req`

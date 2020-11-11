@@ -25,6 +25,7 @@ myApp = angular.module("privacyideaApp",
         'privacyideaApp.auditStates',
         'privacyideaApp.configStates',
         'privacyideaApp.tokenStates',
+        'privacyideaApp.dashboardStates',
         'privacyideaApp.userStates',
         'privacyideaApp.machineStates',
         'privacyideaApp.registerStates',
@@ -96,11 +97,10 @@ myApp.run(['$rootScope', '$state', '$stateParams', 'gettextCatalog',
             // It's very handy to add references to $state and $stateParams to the $rootScope
             // so that you can access them from any scope within your applications.For example,
             // <li ng-class="{ active: $state.includes('contacts.list') }"> will set the <li>
-            // to active whenever 'contacts.list' or one of its decendents is active.
+            // to active whenever 'contacts.list' or one of its descendents is active.
             $rootScope.$state = $state;
             $rootScope.$stateParams = $stateParams;
             gettextCatalog.setCurrentLanguage(browserLanguage);
-            gettextCatalog.debug = true;
 
             // we set this, so we can use it in templates
             $rootScope.browserLanguage = browserLanguage;
