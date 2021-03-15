@@ -46,11 +46,13 @@ from privacyidea.lib.realm import get_realms
 from privacyidea.lib.token import (set_realms, remove_token, enable_token,
                                    unassign_token, init_token, set_description,
                                    set_count_window, add_tokeninfo,
-                                   set_failcounter, delete_tokeninfo)
+                                   set_failcounter, delete_tokeninfo,
+                                   get_one_token, set_max_failcount)
 from privacyidea.lib.utils import (parse_date, is_true,
                                    parse_time_offset_from_now)
 from privacyidea.lib.tokenclass import DATE_FORMAT, AUTH_DATE_FORMAT
 from privacyidea.lib.smtpserver import get_smtpservers
+from privacyidea.lib.smsprovider.SMSProvider import get_smsgateway
 from privacyidea.lib import _
 import logging
 import datetime
@@ -76,6 +78,8 @@ class ACTION_TYPE(object):
     SET_COUNTWINDOW = "set countwindow"
     SET_TOKENINFO = "set tokeninfo"
     SET_FAILCOUNTER = "set failcounter"
+    SET_MAXFAIL = "set max failcount"
+    CHANGE_FAILCOUNTER = "change failcounter"
     DELETE_TOKENINFO = "delete tokeninfo"
     SET_RANDOM_PIN = "set random pin"
 
@@ -181,6 +185,13 @@ class TokenEventHandler(BaseEventHandler):
                             "description": _("Use a specific SMTP server configuration for this token."),
                             "value": [server.config.identifier for server in get_smtpservers()]
                         },
+                        "sms_identifier": {
+                            "type": "str",
+                            "visibleIf": "tokentype",
+                            "visibleValue": "sms",
+                            "description": _("Use a specific SMS gateway configuration for this token."),
+                            "value": [gateway.identifier for gateway in get_smsgateway()]
+                        },
                         "additional_params": {
                             "type": "str",
                             "description": _("A dictionary of additional init parameters.")
@@ -239,6 +250,25 @@ class TokenEventHandler(BaseEventHandler):
                                                     "the token.")
                                }
                        },
+                   ACTION_TYPE.CHANGE_FAILCOUNTER:
+                       {
+                           "change fail counter":
+                               {
+                                   "type": "str",
+                                   "required": True,
+                                   "description": _("Increase or decrease the fail counter of the token. "
+                                                    "Values of +n, -n with n being an integer are accepted.")
+                               }
+                       },
+                   ACTION_TYPE.SET_MAXFAIL:
+                       {
+                            "max failcount":
+                                {
+                                    "type": "str",
+                                    "required": True,
+                                    "description": _("Set the maximum failcounter of the token.")
+                                }
+                       },
                    ACTION_TYPE.SET_TOKENINFO:
                        {"key":
                            {
@@ -294,6 +324,8 @@ class TokenEventHandler(BaseEventHandler):
                               ACTION_TYPE.SET_COUNTWINDOW,
                               ACTION_TYPE.SET_TOKENINFO,
                               ACTION_TYPE.SET_FAILCOUNTER,
+                              ACTION_TYPE.SET_MAXFAIL,
+                              ACTION_TYPE.CHANGE_FAILCOUNTER,
                               ACTION_TYPE.SET_RANDOM_PIN,
                               ACTION_TYPE.DELETE_TOKENINFO]:
             if serial:
@@ -377,6 +409,20 @@ class TokenEventHandler(BaseEventHandler):
                     except Exception as exx:
                         log.warning("Misconfiguration: Failed to set fail "
                                     "counter!")
+                elif action.lower() == ACTION_TYPE.SET_MAXFAIL:
+                    try:
+                        set_max_failcount(serial,
+                                          int(handler_options.get("max failcount")))
+                    except Exception as exx:
+                        log.warning("Misconfiguration: Failed to set max failcount!")
+                elif action.lower() == ACTION_TYPE.CHANGE_FAILCOUNTER:
+                    try:
+                        token_obj = get_one_token(serial=serial)
+                        token_obj.set_failcount(
+                            token_obj.token.failcount + int(handler_options.get("change fail counter")))
+                    except Exception as exx:
+                        log.warning("Misconfiguration: Failed to increase or decrease fail "
+                                    "counter!")
             else:
                 log.info("Action {0!s} requires serial number. But no serial "
                          "number could be found in request.")
@@ -405,6 +451,8 @@ class TokenEventHandler(BaseEventHandler):
                         if not init_param['phone']:
                             log.warning("Enrolling SMS token. But the user "
                                         "{0!r} has no mobile number!".format(user))
+                    if handler_options.get("sms_identifier"):
+                        init_param["sms.identifier"] = handler_options.get("sms_identifier")
                 elif tokentype == "email":
                     if handler_options.get("dynamic_email"):
                         init_param["dynamic_email"] = 1

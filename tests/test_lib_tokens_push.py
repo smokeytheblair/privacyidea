@@ -34,6 +34,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
+from google.oauth2 import service_account
 from threading import Timer
 import time
 
@@ -51,18 +52,10 @@ FB_CONFIG_VALS = {
     FIREBASE_CONFIG.JSON_CONFIG: FIREBASE_FILE}
 
 
-class myAccessTokenInfo(object):
-    def __init__(self, access_token):
-        self.access_token = access_token
-        self.expires_in = 3600
-
-
-class myCredentials(object):
-    def __init__(self, access_token_info):
-        self.access_token_info = access_token_info
-
-    def get_access_token(self):
-        return self.access_token_info
+def _create_credential_mock():
+    c = service_account.Credentials('a', 'b', 'c')
+    return mock.MagicMock(spec=c, expired=False, expiry=None,
+                          access_token='my_new_bearer_token')
 
 
 class PushTokenTestCase(MyTestCase):
@@ -103,8 +96,8 @@ class PushTokenTestCase(MyTestCase):
         tok.add_tokeninfo(PUBLIC_KEY_SERVER, self.server_public_key_pem)
         tok.add_tokeninfo(PRIVATE_KEY_SERVER, self.server_private_key_pem, 'password')
         tok.del_tokeninfo("enrollment_credential")
-        tok.rollout_state = "enrolled"
-        tok.active = True
+        tok.token.rollout_state = "enrolled"
+        tok.token.active = True
         return tok
 
     def test_01_create_token(self):
@@ -320,25 +313,34 @@ class PushTokenTestCase(MyTestCase):
             self.assertEqual(tokeninfo.get("public_key_server").strip().strip("-BEGIN END RSA PUBLIC KEY-").strip(), pubkey)
             # The token should also contain the firebase config
             self.assertEqual(tokeninfo.get(PUSH_ACTION.FIREBASE_CONFIG), self.firebase_config_name)
+            remove_token(serial=serial)
+
+        delete_smsgateway(self.firebase_config_name)
+        delete_policy('push1')
 
     @responses.activate
     def test_03a_api_authenticate_fail(self):
-        # This tests the failed to communicate to the firebase service
+        # This tests failure to communicate to the firebase service
         self.setUp_user_realms()
-
-        # get enrolled push token
-        toks = get_tokens(tokentype="push")
-        self.assertEqual(len(toks), 1)
-        tokenobj = toks[0]
-
+        # create FireBase Service and policies
+        set_smsgateway(self.firebase_config_name,
+                       u'privacyidea.lib.smsprovider.FirebaseProvider.FirebaseProvider',
+                       "myFB", FB_CONFIG_VALS)
+        set_policy("push1", scope=SCOPE.ENROLL,
+                   action="{0!s}={1!s}".format(PUSH_ACTION.FIREBASE_CONFIG,
+                                               self.firebase_config_name))
+        # create push token
+        tokenobj = self._create_push_token()
+        serial = tokenobj.get_serial()
         # set PIN
         tokenobj.set_pin("pushpin")
         tokenobj.add_user(User("cornelius", self.realm1))
 
         # We mock the ServiceAccountCredentials, since we can not directly contact the Google API
-        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.ServiceAccountCredentials') as mySA:
+        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.service_account.Credentials'
+                        '.from_service_account_file') as mySA:
             # alternative: side_effect instead of return_value
-            mySA.from_json_keyfile_name.return_value = myCredentials(myAccessTokenInfo("my_bearer_token"))
+            mySA.return_value = _create_credential_mock()
 
             # add responses, to simulate the failing communication (status 500)
             responses.add(responses.POST, 'https://fcm.googleapis.com/v1/projects/test-123456/messages:send',
@@ -357,34 +359,108 @@ class PushTokenTestCase(MyTestCase):
                 jsonresp = res.json
                 self.assertFalse(jsonresp.get("result").get("status"))
                 self.assertEqual(jsonresp.get("result").get("error").get("code"), 401)
-                self.assertEqual(jsonresp.get("result").get("error").get("message"), "ERR401: Failed to submit "
-                                                                                     "message to firebase service.")
+                self.assertEqual(jsonresp.get("result").get("error").get("message"),
+                                 "ERR401: Failed to submit message to firebase service.")
 
-            # Our ServiceAccountCredentials mock has been called once, because no access token has been fetched before
-            self.assertEqual(len(mySA.from_json_keyfile_name.mock_calls), 1)
+            # Our ServiceAccountCredentials mock has been called once, because
+            # no access token has been fetched before
+            mySA.assert_called_once()
             self.assertIn(FIREBASE_FILE, get_app_local_store()["firebase_token"])
+
+            # By default, polling is allowed for push tokens so the corresponding
+            # challenge should be available in the challenge table, even though
+            # the request to firebase failed.
+            chals = get_challenges(serial=tokenobj.token.serial)
+            self.assertEqual(len(chals), 1, chals)
+            chals[0].delete()
+
+            # Now disable polling and check that no challenge is created
+            # disallow polling through a policy
+            set_policy('push_poll', SCOPE.AUTH,
+                       action='{0!s}={1!s}'.format(PUSH_ACTION.ALLOW_POLLING,
+                                                   PushAllowPolling.DENY))
+            with self.app.test_request_context('/validate/check',
+                                               method='POST',
+                                               data={"user": "cornelius",
+                                                     "realm": self.realm1,
+                                                     "pass": "pushpin"}):
+                res = self.app.full_dispatch_request()
+                self.assertTrue(res.status_code == 400, res)
+                jsonresp = res.json
+                self.assertFalse(jsonresp.get("result").get("status"))
+                self.assertEqual(jsonresp.get("result").get("error").get("code"), 401)
+                self.assertEqual(jsonresp.get("result").get("error").get("message"),
+                                 "ERR401: Failed to submit message to firebase service.")
+            self.assertEqual(len(get_challenges(serial=tokenobj.token.serial)), 0)
+            # disallow polling the specific token through a policy
+            set_policy('push_poll', SCOPE.AUTH,
+                       action='{0!s}={1!s}'.format(PUSH_ACTION.ALLOW_POLLING,
+                                                   PushAllowPolling.TOKEN))
+            tokenobj.add_tokeninfo(POLLING_ALLOWED, False)
+            with self.app.test_request_context('/validate/check',
+                                               method='POST',
+                                               data={"user": "cornelius",
+                                                     "realm": self.realm1,
+                                                     "pass": "pushpin"}):
+                res = self.app.full_dispatch_request()
+                self.assertTrue(res.status_code == 400, res)
+                jsonresp = res.json
+                self.assertFalse(jsonresp.get("result").get("status"))
+                self.assertEqual(jsonresp.get("result").get("error").get("code"), 401)
+                self.assertEqual(jsonresp.get("result").get("error").get("message"),
+                                 "ERR401: Failed to submit message to firebase service.")
+            self.assertEqual(len(get_challenges(serial=tokenobj.token.serial)), 0)
+            # Check that the challenge is created if the request to firebase
+            # succeeded even though polling is disabled
+            # add responses, to simulate the successful communication to firebase
+            responses.replace(responses.POST,
+                              'https://fcm.googleapis.com/v1/projects/test-123456/messages:send',
+                              body="""{}""",
+                              content_type="application/json")
+            with self.app.test_request_context('/validate/check',
+                                               method='POST',
+                                               data={"user": "cornelius",
+                                                     "realm": self.realm1,
+                                                     "pass": "pushpin"}):
+                res = self.app.full_dispatch_request()
+                self.assertTrue(res.status_code == 200, res)
+                jsonresp = res.json
+                self.assertTrue(jsonresp.get("result").get("status"))
+            self.assertEqual(len(get_challenges(serial=tokenobj.token.serial)), 1)
+            get_challenges(serial=tokenobj.token.serial)[0].delete()
+        remove_token(serial=serial)
+        delete_smsgateway(self.firebase_config_name)
+        delete_policy('push_poll')
+        delete_policy('push1')
 
     @responses.activate
     def test_03b_api_authenticate_client(self):
         # Test the /validate/check endpoints without the smartphone endpoint /ttype/push
         self.setUp_user_realms()
-
-        # get enrolled push token
-        toks = get_tokens(tokentype="push")
-        self.assertEqual(len(toks), 1)
-        tokenobj = toks[0]
-
+        # create FireBase Service and policies
+        set_smsgateway(self.firebase_config_name,
+                       u'privacyidea.lib.smsprovider.FirebaseProvider.FirebaseProvider',
+                       "myFB", FB_CONFIG_VALS)
+        set_policy("push_config", scope=SCOPE.ENROLL,
+                   action="{0!s}={1!s}".format(PUSH_ACTION.FIREBASE_CONFIG,
+                                               self.firebase_config_name))
+        # create push token
+        tokenobj = self._create_push_token()
+        serial = tokenobj.get_serial()
         # set PIN
         tokenobj.set_pin("pushpin")
         tokenobj.add_user(User("cornelius", self.realm1))
 
+        cached_fbtoken = {
+            'firebase_token': {
+                FB_CONFIG_VALS[FIREBASE_CONFIG.JSON_CONFIG]: _create_credential_mock()}}
+        self.app.config.setdefault('_app_local_store', {}).update(cached_fbtoken)
         # We mock the ServiceAccountCredentials, since we can not directly contact the Google API
-        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.ServiceAccountCredentials') as mySA:
-            # alternative: side_effect instead of return_value
-            mySA.from_json_keyfile_name.return_value = myCredentials(myAccessTokenInfo("my_bearer_token"))
-
+        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.service_account'
+                        '.Credentials.from_service_account_file') as mySA:
             # add responses, to simulate the communication to firebase
-            responses.add(responses.POST, 'https://fcm.googleapis.com/v1/projects/test-123456/messages:send',
+            responses.add(responses.POST, 'https://fcm.googleapis.com/v1/projects'
+                                          '/test-123456/messages:send',
                           body="""{}""",
                           content_type="application/json")
 
@@ -405,8 +481,10 @@ class PushTokenTestCase(MyTestCase):
                 self.assertEqual(jsonresp.get("detail").get("message"), DEFAULT_CHALLENGE_TEXT)
 
             # Our ServiceAccountCredentials mock has not been called because we use a cached token
-            self.assertEqual(len(mySA.from_json_keyfile_name.mock_calls), 0)
+            mySA.assert_not_called()
             self.assertIn(FIREBASE_FILE, get_app_local_store()["firebase_token"])
+            # remove cached Credentials
+            get_app_local_store().pop("firebase_token")
 
         # The mobile device has not communicated with the backend, yet.
         # The user is not authenticated!
@@ -472,9 +550,11 @@ class PushTokenTestCase(MyTestCase):
         with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.time') as mock_time:
             mock_time.time.return_value = time.time() + 4000
 
-            with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.ServiceAccountCredentials') as mySA:
+            with mock.patch(
+                    'privacyidea.lib.smsprovider.FirebaseProvider.service_account.Credentials'
+                    '.from_service_account_file') as mySA:
                 # alternative: side_effect instead of return_value
-                mySA.from_json_keyfile_name.return_value = myCredentials(myAccessTokenInfo("my_new_bearer_token"))
+                mySA.return_value = _create_credential_mock()
 
                 # add responses, to simulate the communication to firebase
                 responses.add(responses.POST, 'https://fcm.googleapis.com/v1/projects/test-123456/messages:send',
@@ -501,15 +581,16 @@ class PushTokenTestCase(MyTestCase):
                 delete_policy("push1")
 
             # Our ServiceAccountCredentials mock has been called once because we fetched a new token
-            self.assertEqual(len(mySA.from_json_keyfile_name.mock_calls), 1)
+            mySA.assert_called_once()
             self.assertIn(FIREBASE_FILE, get_app_local_store()["firebase_token"])
             self.assertEqual(get_app_local_store()["firebase_token"][FIREBASE_FILE].access_token,
                              "my_new_bearer_token")
 
         # Authentication fails, if the push notification is not accepted within the configured time
-        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.ServiceAccountCredentials') as mySA:
+        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.service_account.Credentials'
+                        '.from_service_account_file') as mySA:
             # alternative: side_effect instead of return_value
-            mySA.from_json_keyfile_name.return_value = myCredentials(myAccessTokenInfo("my_bearer_token"))
+            mySA.return_value = _create_credential_mock()
 
             # add responses, to simulate the communication to firebase
             responses.add(responses.POST, 'https://fcm.googleapis.com/v1/projects/test-123456/messages:send',
@@ -531,6 +612,7 @@ class PushTokenTestCase(MyTestCase):
                 self.assertTrue(jsonresp.get("result").get("status"))
                 self.assertEqual(jsonresp.get("detail").get("serial"), tokenobj.token.serial)
             delete_policy("push1")
+        delete_policy('push_config')
 
     def mark_challenge_as_accepted(self):
         # We simply mark all challenges as successfully answered!
@@ -572,9 +654,10 @@ class PushTokenTestCase(MyTestCase):
             return (200, headers, json.dumps({}))
 
         # We mock the ServiceAccountCredentials, since we can not directly contact the Google API
-        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.ServiceAccountCredentials') as mySA:
+        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.service_account.Credentials'
+                        '.from_service_account_file') as mySA:
             # alternative: side_effect instead of return_value
-            mySA.from_json_keyfile_name.return_value = myCredentials(myAccessTokenInfo("my_bearer_token"))
+            mySA.from_json_keyfile_name.return_value = _create_credential_mock()
 
             # add responses, to simulate the communication to firebase
             responses.add_callback(responses.POST, 'https://fcm.googleapis.com/v1/projects/test-123456/messages:send',
@@ -748,9 +831,10 @@ class PushTokenTestCase(MyTestCase):
                    action="{}={}".format(ACTION.LOGINMODE, LOGINMODE.PRIVACYIDEA))
         # Set a PUSH_WAIT action which will be ignored by privacyIDEA
         set_policy("push1", scope=SCOPE.AUTH, action="{0!s}=20".format(PUSH_ACTION.WAIT))
-        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.ServiceAccountCredentials') as mySA:
+        with mock.patch('privacyidea.lib.smsprovider.FirebaseProvider.service_account.Credentials'
+                        '.from_service_account_file') as mySA:
             # alternative: side_effect instead of return_value
-            mySA.from_json_keyfile_name.return_value = myCredentials(myAccessTokenInfo("my_bearer_token"))
+            mySA.from_json_keyfile_name.return_value = _create_credential_mock()
 
             # add responses, to simulate the communication to firebase
             responses.add(responses.POST, 'https://fcm.googleapis.com/v1/projects/test-123456/messages:send',
@@ -821,6 +905,34 @@ class PushTokenTestCase(MyTestCase):
 
         delete_policy("push1")
         delete_policy("webui")
+
+    def test_07_check_timestamp(self):
+        timestamp_fmt = 'broken_timestamp_010203'
+        self.assertRaisesRegexp(privacyIDEAError,
+                                r'Could not parse timestamp {0!s}. ISO-Format '
+                                r'required.'.format(timestamp_fmt),
+                                PushTokenClass._check_timestamp_in_range, timestamp_fmt, 10)
+        timestamp = datetime(2020, 11, 13, 13, 27, tzinfo=utc)
+        with mock.patch('privacyidea.lib.tokens.pushtoken.datetime') as mock_dt:
+            mock_dt.now.return_value = timestamp + timedelta(minutes=9)
+            PushTokenClass._check_timestamp_in_range(timestamp.isoformat(), 10)
+        with mock.patch('privacyidea.lib.tokens.pushtoken.datetime') as mock_dt:
+            mock_dt.now.return_value = timestamp - timedelta(minutes=9)
+            PushTokenClass._check_timestamp_in_range(timestamp.isoformat(), 10)
+        with mock.patch('privacyidea.lib.tokens.pushtoken.datetime') as mock_dt:
+            mock_dt.now.return_value = timestamp + timedelta(minutes=9)
+            self.assertRaisesRegexp(privacyIDEAError,
+                                    r'Timestamp {0!s} not in valid '
+                                    r'range.'.format(timestamp.isoformat().replace('+', r'\+')),
+                                    PushTokenClass._check_timestamp_in_range,
+                                    timestamp.isoformat(), 8)
+        with mock.patch('privacyidea.lib.tokens.pushtoken.datetime') as mock_dt:
+            mock_dt.now.return_value = timestamp - timedelta(minutes=9)
+            self.assertRaisesRegexp(privacyIDEAError,
+                                    r'Timestamp {0!s} not in valid '
+                                    r'range.'.format(timestamp.isoformat().replace('+', r'\+')),
+                                    PushTokenClass._check_timestamp_in_range,
+                                    timestamp.isoformat(), 8)
 
     def test_10_api_endpoint(self):
         # first check for unused request methods
@@ -930,6 +1042,56 @@ class PushTokenTestCase(MyTestCase):
         self.assertEqual(res[1]['detail']['rollout_state'], 'enrolled', res)
 
         remove_token(serial)
+
+    def test_11_api_endpoint_update_fbtoken(self):
+        g = FakeFlaskG()
+        # create a push token
+        tparams = {'type': 'push', 'genkey': 1}
+        tparams.update(FB_CONFIG_VALS)
+        tok = init_token(param=tparams)
+        serial = tok.get_serial()
+
+        # Run enrollment step 2
+        tok.update({"enrollment_credential": tok.get_tokeninfo("enrollment_credential"),
+                    "serial": serial,
+                    "fbtoken": "firebasetoken1",
+                    "pubkey": self.smartphone_public_key_pem_urlsafe})
+        self.assertEqual(tok.token.get('rollout_state'), 'enrolled', tok)
+        self.assertEqual(tok.get_tokeninfo('firebase_token'), 'firebasetoken1', tok)
+
+        req_data = {'new_fb_token': 'firebasetoken2',
+                    'serial': serial,
+                    'timestamp': datetime.now(tz=utc).isoformat()}
+
+        # now we perform the firebase token update with a broken signature
+        builder = EnvironBuilder(method='POST',
+                                 headers={})
+        req = Request(builder.get_environ())
+        req.all_data = req_data
+        req.all_data.update({'signature': 'bad-signature'})
+        self.assertRaisesRegexp(privacyIDEAError, 'Could not verify signature!',
+                                PushTokenClass.api_endpoint, req, g)
+
+        # Create a correct signature
+        sign_string = u"{new_fb_token}|{serial}|{timestamp}".format(**req_data)
+        sig = self.smartphone_private_key.sign(sign_string.encode('utf8'),
+                                               padding.PKCS1v15(),
+                                               hashes.SHA256())
+        req_data.update({'signature': b32encode(sig)})
+
+        # and perform the firebase token update
+        builder = EnvironBuilder(method='POST',
+                                 headers={})
+        req = Request(builder.get_environ())
+        req.all_data = req_data
+        res = PushTokenClass.api_endpoint(req, g)
+        self.assertEqual(res[0], 'json', res)
+        self.assertTrue(res[1]['result']['value'], res)
+        self.assertTrue(res[1]['result']['status'], res)
+
+        self.assertEqual(tok.token.get('rollout_state'), 'enrolled', tok)
+        self.assertEqual(tok.get_tokeninfo('firebase_token'), req_data['new_fb_token'], tok)
+        tok.delete_token()
 
     def test_15_poll_endpoint(self):
         g = FakeFlaskG()

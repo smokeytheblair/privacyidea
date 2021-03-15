@@ -154,13 +154,13 @@ the 172.16.0.17.
 time
 ----
 You can specify a time in which the policy should be active.
-Time formats are
+Time formats are::
 
 <dow>-<dow>:<hh>:<mm>-<hh>:<mm>, ...
 <dow>:<hh>:<mm>-<hh>:<mm>
 <dow>:<hh>-<hh>
 
-and any combination of it. "dow" being day of week Mon, Tue, Wed, Thu, Fri,
+and any combination of it. ``dow`` being day of week Mon, Tue, Wed, Thu, Fri,
 Sat, Sun.
 """
 from .log import log_with
@@ -169,7 +169,7 @@ from configobj import ConfigObj
 from operator import itemgetter
 import six
 import logging
-from ..models import (Policy, db, save_config_timestamp)
+from ..models import (Policy, db, save_config_timestamp, Token)
 from privacyidea.lib.config import (get_token_classes, get_token_types,
                                     get_config_object, get_privacyidea_node)
 from privacyidea.lib.framework import get_app_config_value
@@ -245,6 +245,7 @@ class ACTION(object):
     FORCE_APP_PIN = "force_app_pin"
     GETSERIAL = "getserial"
     GETRANDOM = "getrandom"
+    HIDE_AUDIT_COLUMNS = "hide_audit_columns"
     IMPORT = "importtokens"
     LASTAUTH = "last_auth"
     LOGINMODE = "login_mode"
@@ -283,6 +284,8 @@ class ACTION(object):
     POLICYREAD = "policyread"
     POLICYTEMPLATEURL = "policy_template_url"
     REALM = "realm"
+    REGISTRATIONCODE_LENGTH = "registration.length"
+    REGISTRATIONCODE_CONTENTS = "registration.contents"
     REMOTE_USER = "remote_user"
     REQUIREDEMAIL = "requiredemail"
     RESET = "reset"
@@ -351,6 +354,7 @@ class ACTION(object):
     SHOW_SEED = "show_seed"
     CUSTOM_MENU = "custom_menu"
     CUSTOM_BASELINE = "custom_baseline"
+    GDPR_LINK = "privacy_statement_link"
     STATISTICSREAD = "statistics_read"
     STATISTICSDELETE = "statistics_delete"
     LOGIN_TEXT = "login_text"
@@ -359,6 +363,7 @@ class ACTION(object):
     SHOW_IOS_AUTHENTICATOR = "show_ios_privacyidea_authenticator"
     SHOW_CUSTOM_AUTHENTICATOR = "show_custom_authenticator"
     AUTHORIZED = "authorized"
+    SHOW_NODE = "show_node"
 
 
 class AUTHORIZED(object):
@@ -393,7 +398,6 @@ class MAIN_MENU(object):
     COMPONENTS = "components"
 
 
-
 class LOGINMODE(object):
     __doc__ = """This is the list of possible values for the login mode."""
     USERSTORE = "userstore"
@@ -405,6 +409,7 @@ class REMOTE_USER(object):
     __doc__ = """The list of possible values for the remote_user policy."""
     DISABLE = "disable"
     ACTIVE = "allowed"
+    FORCE = "force"
 
 
 class ACTIONVALUE(object):
@@ -431,6 +436,7 @@ class TIMEOUT_ACTION(object):
 class CONDITION_SECTION(object):
     __doc__ = """This is a list of available sections for conditions of policies """
     USERINFO = "userinfo"
+    TOKENINFO = "tokeninfo"
     HTTP_REQUEST_HEADER = "HTTP Request header"
 
 
@@ -524,7 +530,7 @@ class PolicyClass(object):
         :param adminuser: This is the username of the admin. This in only
             evaluated in the scope admin.
         :param sort_by_priority: If true, sort the resulting list by priority, ascending
-        by their policy numbers.
+            by their policy numbers.
         :type sort_by_priority: bool
         :return: list of policies
         :rtype: list of dicts
@@ -652,7 +658,7 @@ class PolicyClass(object):
     def match_policies(self, name=None, scope=None, realm=None, active=None,
                        resolver=None, user=None, user_object=None, pinode=None,
                        client=None, action=None, adminrealm=None, adminuser=None, time=None,
-                       sort_by_priority=True, audit_data=None, request_headers=None):
+                       sort_by_priority=True, audit_data=None, request_headers=None, serial=None):
         """
         Return all policies matching the given context.
         Optionally, write the matching policies to the audit log.
@@ -679,10 +685,11 @@ class PolicyClass(object):
         :param sort_by_priority:
         :param user_object: the currently active user, or None
         :type user_object: User or None
-        :param time: return only policies that are valid at the specified time. Defaults to the current time.
+        :param time: return only policies that are valid at the specified time.
+            Defaults to the current time.
         :type time: datetime or None
         :param audit_data: A dictionary with audit data collected during a request. This
-        method will add found policies to the dictionary.
+            method will add found policies to the dictionary.
         :type audit_data: dict or None
         :param request_headers: A dict with HTTP headers
         :return: a list of policy dictionaries
@@ -720,7 +727,8 @@ class PolicyClass(object):
         log.debug("Policies after matching time: {0!s}".format([p.get("name") for p in reduced_policies]))
 
         # filter policies by the policy conditions
-        reduced_policies = self.filter_policies_by_conditions(reduced_policies, user_object, request_headers)
+        reduced_policies = self.filter_policies_by_conditions(reduced_policies, user_object, request_headers,
+                                                              serial)
         log.debug("Policies after matching conditions".format([p.get("name") for p in reduced_policies]))
 
         if audit_data is not None:
@@ -729,7 +737,7 @@ class PolicyClass(object):
 
         return reduced_policies
 
-    def filter_policies_by_conditions(self, policies, user_object=None, request_headers=None):
+    def filter_policies_by_conditions(self, policies, user_object=None, request_headers=None, serial=None):
         """
         Given a list of policy dictionaries and a current user object (if any),
         return a list of all policies whose conditions match the given user object.
@@ -746,7 +754,16 @@ class PolicyClass(object):
             for section, key, comparator, value, active in policy['conditions']:
                 if active:
                     if section == CONDITION_SECTION.USERINFO:
-                        if not self._policy_matches_userinfo_condition(policy, key, comparator, value, user_object):
+                        if not self._policy_matches_info_condition(policy, key, comparator, value,
+                                                                   CONDITION_SECTION.USERINFO,
+                                                                   user_object=user_object):
+                            include_policy = False
+                            break
+                    elif section == CONDITION_SECTION.TOKENINFO:
+                        dbtoken = Token.query.filter(Token.serial == serial).first() if serial else None
+                        if not self._policy_matches_info_condition(policy, key, comparator, value,
+                                                                   CONDITION_SECTION.TOKENINFO,
+                                                                   dbtoken=dbtoken):
                             include_policy = False
                             break
                     elif section == CONDITION_SECTION.HTTP_REQUEST_HEADER:
@@ -793,48 +810,54 @@ class PolicyClass(object):
                         u" is not available".format(policy["name"], key))
 
     @staticmethod
-    def _policy_matches_userinfo_condition(policy, key, comparator, value, user_object):
+    def _policy_matches_info_condition(policy, key, comparator, value, type, user_object=None, dbtoken=None):
         """
-        Check if the given policy matches a certain userinfo condition.
-        If ``user_object`` is None, a PolicyError is raised.
+        Check if the given policy matches a certain userinfo or tokeninfo condition depending
+        on the specified ``type``.
+        For the userinfo, if ``user_object`` is None or the requested ``key`` is not contained,
+        a PolicyError is raised.
+        In case of a tokeninfo, no exception is raised if ``dbtoken`` is malformed. Instead, the
+        condition is effectively set to True and the policy may apply.
         :param policy: a policy dictionary, the policy in question
-        :param key: a userinfo key
+        :param key: a tokeninfo or userinfo key
         :param comparator: a value comparator: one of "equal", "contains"
-        :param value: a value against which the userinfo value will be compared
+        :param value: a value against which the tokeninfo or userinfo value will be compared
+        :param type: the info type to match, "userinfo" or "tokeninfo"
         :param user_object: a User object, if any, or None
+        :param dbtoken: a dbtoken object, if any, or None
         :return: a Boolean
         """
-        # Match the user object's user info, if it is not-None and non-empty
-        if user_object is not None:
-            info = user_object.info
+        if user_object is not None or dbtoken is not None:
+            info = user_object.info if user_object is not None else dbtoken.get_info()
+
             if key in info:
                 try:
                     return compare_values(info[key], comparator, value)
                 except Exception as exx:
-                    log.warning(u"Error during handling the condition on userinfo {!r} of policy {!r}: {!r}".format(
-                        key, policy['name'], exx
+                    log.warning(u"Error during handling the condition on {!s} {!r} of policy {!r}: {!r}".format(
+                        type, key, policy['name'], exx
                     ))
                     raise PolicyError(
-                        u"Invalid comparison in the userinfo conditions of policy {!r}".format(policy['name']))
+                        u"Invalid comparison in the {!s} conditions of policy {!r}".format(type, policy['name']))
             else:
-                # If we do have a user object, but the conditions of policies reference
-                # an unknown userinfo key, we have a misconfiguration and raise an error.
-                log.warning(u"Unknown userinfo key referenced in a condition of policy {!r}: {!r}".format(
-                    policy['name'], key
+                log.warning(u"Unknown {!s} key referenced in a condition of policy {!r}: {!r}".format(
+                    type, policy['name'], key
                 ))
-                raise PolicyError(u"Unknown key in the userinfo conditions of policy {!r}".format(
-                    policy['name']
+                # If we do have an user or token object, but the conditions of policies reference
+                # an unknown userinfo or tokeninfo key, we have a misconfiguration and raise an error.
+                raise PolicyError(u"Unknown key in the {!s} conditions of policy {!r}".format(
+                    type, policy['name']
                 ))
         else:
-            log.warning(u"Policy {!r} has condition on userinfo {!r}, but a user_object is not available".format(
-                policy['name'], key
+            log.warning(u"Policy {!r} has condition on {!s} {!r}, but the according object"
+                        u" is not available.".format(policy['name'], type, key
             ))
-            # If the policy specifies a userinfo condition, but no user object is available,
+            # If the policy specifies a userinfo or tokeninfo condition, but no object is available,
             # the policy is misconfigured. We have to raise a PolicyError to ensure that
             # the privacyIDEA server does not silently misbehave.
             raise PolicyError(
-                u"Policy {!r} has condition on userinfo, but a user_object is not available".format(
-                    policy['name']
+                u"Policy {!r} has condition on {!s}, but an according object is not available".format(
+                    policy['name'], type
                 ))
 
     @staticmethod
@@ -864,6 +887,7 @@ class PolicyClass(object):
     def extract_action_values(policies, action, unique=False, allow_white_space_in_action=False):
         """
         Given an action, extract all values the given policies specify for that action.
+
         :param policies: a list of policy dictionaries
         :type policies: list
         :param action: a policy action
@@ -917,14 +941,21 @@ class PolicyClass(object):
                           allow_white_space_in_action=False, adminrealm=None, adminuser=None,
                           user_object=None, audit_data=None):
         """
-        Get the defined action values for a certain action like
+        Get the defined action values for a certain actions.
+
+        Calling the function with parameters like::
+
             scope: authorization
             action: tokentype
-        would return a dictionary of {tokentype: policyname}
+
+        would return a dictionary of ``{tokentype: policyname}``.
+
+        A call with the parameters::
 
             scope: authorization
             action: serial
-        would return a dictionary of {serial: policyname}
+
+        would return a dictionary of ``{serial: policyname}``
 
         All parameters not described below are covered in the documentation of ``match_policies``.
 
@@ -1120,8 +1151,10 @@ def set_policy(name=None, scope=None, action=None, realm=None, resolver=None,
                conditions=None, pinode=None):
     """
     Function to set a policy.
+
     If the policy with this name already exists, it updates the policy.
     It expects a dict of with the following keys:
+
     :param name: The name of the policy
     :param scope: The scope of the policy. Something like "admin" or "authentication"
     :param action: A scope specific action or a comma separated list of actions
@@ -1294,9 +1327,12 @@ def export_policies(policies):
 def import_policies(file_contents):
     """
     This function imports policies from a file.
-    The file has a config_object format, i.e. the text file has a header
+
+    The file has a ``config_object`` format, i.e. the text file has a header::
+
         [<policy_name>]
         key = value
+
     and key value pairs.
 
     :param file_contents: The contents of the file
@@ -1334,7 +1370,7 @@ def get_static_policy_definitions(scope=None):
     :param scope: Optional the scope of the policies
     :type scope: basestring
     :return: allowed scopes with allowed actions, the type of action and a
-    description.
+        description.
     :rtype: dict
     """
     resolvers = list(get_resolver_list())
@@ -1625,6 +1661,11 @@ def get_static_policy_definitions(scope=None):
                                          "entries of the last 10d, 3m or 2y."),
                                "group": GROUP.SYSTEM,
                                'mainmenu': [MAIN_MENU.AUDIT]},
+            ACTION.HIDE_AUDIT_COLUMNS: {'type': 'str',
+                                        "desc": _("The admin will not see the specified columns "
+                                                  "in the audit."),
+                                        "group": GROUP.SYSTEM,
+                                        'mainmenu': [MAIN_MENU.AUDIT]},
             ACTION.AUDIT_DOWNLOAD: {'type': 'bool',
                                "desc": _("The admin is allowed to download "
                                          "the complete auditlog."),
@@ -1842,6 +1883,11 @@ def get_static_policy_definitions(scope=None):
                                "desc": _("The user will only see audit "
                                          "entries of the last 10d, 3m or 2y."),
                                'mainmenu': [MAIN_MENU.AUDIT]},
+            ACTION.HIDE_AUDIT_COLUMNS: {'type': 'str',
+                                        "desc": _("The user will not see the specified columns "
+                                                  "in the audit."),
+                                        "group": GROUP.SYSTEM,
+                                        'mainmenu': [MAIN_MENU.AUDIT]},
             ACTION.USERLIST: {'type': 'bool',
                               'desc': _("The user is allowed to view his "
                                         "own user information."),
@@ -1940,6 +1986,20 @@ def get_static_policy_definitions(scope=None):
                 'value': list(range(1, 61)),
                 'desc': _('The length of the validity for the temporary '
                           'token (in days).')},
+            ACTION.REGISTRATIONCODE_LENGTH: {
+                'type': 'int',
+                'value': list(range(1, 32)),
+                "desc": _("Set the length of registration codes."),
+                'group': GROUP.TOKEN},
+            ACTION.REGISTRATIONCODE_CONTENTS: {
+                'type': 'str',
+                "desc": _("Specify the required "
+                          "contents of the registration code. "
+                          "(c)haracters, (n)umeric, "
+                          "(s)pecial. Use modifiers +/- or a list "
+                          "of allowed characters [1234567890]"),
+                'group': GROUP.TOKEN
+            }
         },
         SCOPE.AUTH: {
             ACTION.OTPPIN: {
@@ -2153,7 +2213,7 @@ def get_static_policy_definitions(scope=None):
             },
             ACTION.REMOTE_USER: {
                 'type': 'str',
-                'value': [REMOTE_USER.ACTIVE, REMOTE_USER.DISABLE],
+                'value': [REMOTE_USER.ACTIVE, REMOTE_USER.DISABLE, REMOTE_USER.FORCE],
                 'desc': _('The REMOTE_USER set by the webserver can be used '
                           'to login to privacyIDEA or it will be ignored. '
                           'Defaults to "disable".')
@@ -2180,6 +2240,10 @@ def get_static_policy_definitions(scope=None):
             ACTION.CUSTOM_BASELINE: {
                 'type': 'str',
                 'desc': _("Use your own html template for the web UI baseline/footer.")
+            },
+            ACTION.GDPR_LINK: {
+                'type': 'str',
+                'desc': _("Link your privacy statement to be displayed in the baseline/footer.")
             },
             ACTION.USERDETAILS: {
                 'type': 'bool',
@@ -2233,6 +2297,11 @@ def get_static_policy_definitions(scope=None):
                 'type': 'bool',
                 'desc': _("If this is checked, the seed "
                           "will be displayed as text during enrollment.")
+            },
+            ACTION.SHOW_NODE: {
+                'type': 'bool',
+                'desc': _("If this is checked, the privacyIDEA Node name will be displayed "
+                          "in the menu bar.")
             },
             ACTION.SHOW_ANDROID_AUTHENTICATOR: {
                 'type': 'bool',
@@ -2297,6 +2366,9 @@ def get_policy_condition_sections():
         CONDITION_SECTION.USERINFO: {
             "description": _("The policy only matches if certain conditions on the user info are fulfilled.")
         },
+        CONDITION_SECTION.TOKENINFO: {
+            "description": _("The policy only matches if certain conditions on the token info are fulfilled.")
+        },
         CONDITION_SECTION.HTTP_REQUEST_HEADER: {
             "description": _("The policy only matches if certain conditions on the HTTP Request header are fulfilled.")
         }
@@ -2318,22 +2390,31 @@ class MatchingError(ServerError):
 
 class Match(object):
     """
-    This class provides a high-level API for policy matching. It should not be instantiated directly. Instead,
-    code should use one of the provided classmethods to construct a ``Match`` object. See the respective
+    This class provides a high-level API for policy matching.
+
+    It should not be instantiated directly. Instead, code should use one of the
+    provided classmethods to construct a ``Match`` object. See the respective
     classmethods for details.
 
-    A ``Match`` object encapsulates a policy matching operation, i.e. a call to ``PolicyClass.match_policies``.
-    In order to retrieve the matching policies, one should use one of ``policies()``, ``action_values()`` and ``any()``.
-    By default, these functions write the matched policies to the audit log. This behavior can be explicitly disabled.
+    A ``Match`` object encapsulates a policy matching operation, i.e. a call to
+    :py:func:`privacyidea.lib.policy.PolicyClass.match_policies`.
+    In order to retrieve the matching policies, one should use one of
+    ``policies()``, ``action_values()`` and ``any()``.
+    By default, these functions write the matched policies to the audit log.
+    This behavior can be explicitly disabled.
 
     Every classmethod expects a so-called "context object" as its first argument.
     The context object implements the following attributes:
-     * ``audit_object``: an ``Audit`` object which is used to write the used policies to the audit log.
-                         In case False is passed for ``write_to_audit_log``, the audit object may be None.
-     * ``policy_object``: a ``PolicyClass`` object that is used to retrieve the matching policies.
+
+     * ``audit_object``: an ``Audit`` object which is used to write the used
+                         policies to the audit log. In case False is passed for
+                         ``write_to_audit_log``, the audit object may be None.
+     * ``policy_object``: a ``PolicyClass`` object that is used to retrieve the
+                          matching policies.
      * ``client_ip``: the IP of the current client, as a string
-     * ``logged_in_user``: a dictionary with keys "username", "realm", "role" that describes the
-                           currently logged-in (managing) user
+     * ``logged_in_user``: a dictionary with keys "username", "realm", "role"
+                           that describes the currently logged-in (managing) user
+
     In our case, this context object is usually the ``flask.g`` object.
     """
     def __init__(self, g, **kwargs):
@@ -2343,8 +2424,12 @@ class Match(object):
 
     def policies(self, write_to_audit_log=True):
         """
-        Return a list of policies. The list is sorted by priority, which means that prioritized policies appear first.
-        :param write_to_audit_log: If True, write the list of matching policies to the audit log
+        Return a list of policies.
+        The list is sorted by priority, which means that prioritized policies
+        appear first.
+
+        :param write_to_audit_log: If True, write the list of matching policies
+            to the audit log
         :return: a list of policy dictionaries
         :rtype: list
         """
@@ -2362,7 +2447,9 @@ class Match(object):
     def any(self, write_to_audit_log=True):
         """
         Return True if at least one policy matches.
-        :param write_to_audit_log: If True, write the list of matching policies to the audit log
+
+        :param write_to_audit_log: If True, write the list of matching policies
+            to the audit log
         :return: True or False
         """
         return bool(self.policies(write_to_audit_log=write_to_audit_log))
@@ -2370,11 +2457,14 @@ class Match(object):
     def action_values(self, unique, allow_white_space_in_action=False, write_to_audit_log=True):
         """
         Return a dictionary of action values extracted from the matching policies.
-        The dictionary maps each action value to a list of policies which define this action value.
+
+        The dictionary maps each action value to a list of policies which define
+        this action value.
+
         :param unique: If True, return only the prioritized action value.
-                       See ``PolicyClass.get_action_values`` for details.
+            See :py:func:`privacyidea.lib.policy.PolicyClass.get_action_values` for details.
         :param allow_white_space_in_action: If True, allow whitespace in action values.
-                       See ``PolicyClass.get_action_values`` for details.
+            See :py:func:`privacyidea.lib.policy.PolicyClass.get_action_values` for details.
         :param write_to_audit_log: If True, augment the audit log with the names of all
                        policies whose action values are returned
         :rtype: dict
@@ -2393,15 +2483,19 @@ class Match(object):
 
     def allowed(self, write_to_audit_log=True):
         """
-        Determine if the matched action is allowed in the scope 'admin' or 'user'.
+        Determine if the matched action is allowed in the scope ``admin`` or ``user``.
+
         This is the case
          * *either* if there are no active policies defined in the matched scope
          * *or* the action is explicitly allowed by a policy in the matched scope
+
         Example usage::
+
             is_allowed = Match.user(g, scope=SCOPE.USER, action=ACTION.ENROLLPIN, user=user_object).allowed()
             # is_allowed is now true
-            # * *either* if there is no active policy defined with scope=SCOPE.USER at all
-            # * *or* if there is a policy matching the given scope, action, user and client IP.
+            #  either if there is no active policy defined with scope=SCOPE.USER at all
+            #  or if there is a policy matching the given scope, action, user and client IP.
+
         :param write_to_audit_log: If True, write the list of matching policies to the audit log
         :return: True or False
         """
@@ -2419,8 +2513,10 @@ class Match(object):
         """
         Match active policies solely based on a scope and an action, which may also be None.
         The client IP is matched implicitly.
+
         :param g: context object
-        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin`` must be used instead.
+        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin``
+            must be used instead.
         :param action: the policy action, or None
         :rtype: ``Match``
         """
@@ -2436,8 +2532,10 @@ class Match(object):
         """
         Match active policies with a scope, an action and a user realm.
         The client IP is matched implicitly.
+
         :param g: context object
-        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin`` must be used instead.
+        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin``
+            must be used instead.
         :param action: the policy action
         :param realm: the realm to match
         :rtype: ``Match``
@@ -2447,18 +2545,21 @@ class Match(object):
         return cls(g, name=None, scope=scope, realm=realm, active=True,
                    resolver=None, user=None, user_object=None,
                    client=g.client_ip, action=action, adminrealm=None, time=None,
-                   sort_by_priority=True)
+                   sort_by_priority=True, serial=g.serial)
 
     @classmethod
     def user(cls, g, scope, action, user_object):
         """
         Match active policies with a scope, an action and a user object (which may be None).
         The client IP is matched implicitly.
+
         :param g: context object
-        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin`` must be used instead.
+        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin``
+            must be used instead.
         :param action: the policy action
-        :param user_object: the user object to match. Might also be None, which means that the policy
-                     attributes ``user``, ``realm`` and ``resolver`` are ignored.
+        :param user_object: the user object to match. Might also be None, which
+            means that the policy attributes ``user``, ``realm`` and
+            ``resolver`` are ignored.
         :type user_object: User or None
         :rtype: ``Match``
         """
@@ -2470,7 +2571,7 @@ class Match(object):
         return cls(g, name=None, scope=scope, realm=None, active=True,
                    resolver=None, user=None, user_object=user_object,
                    client=g.client_ip, action=action, adminrealm=None, time=None,
-                   sort_by_priority=True)
+                   sort_by_priority=True, serial=g.serial)
 
     @classmethod
     def token(cls, g, scope, action, token_obj):
@@ -2480,8 +2581,10 @@ class Match(object):
         From the token object we try to determine the user as the owner.
         If the token has no owner, we try to determine the tokenrealm.
         We fallback to realm=None
+
         :param g: context object
-        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin`` must be used instead.
+        :param scope: the policy scope. SCOPE.ADMIN cannot be passed, ``admin``
+            must be used instead.
         :param action: the policy action
         :param token_obj: The token where the user object or the realm should match.
         :rtype: ``Match``
@@ -2508,6 +2611,7 @@ class Match(object):
         Policies will be matched against the admin's username and adminrealm,
         and optionally also the provided user_obj on which the admin is acting
         The client IP is matched implicitly.
+
         :param g: context object
         :param action: the policy action
         :param user_obj: the user against which policies should be matched. Can be None.
@@ -2522,7 +2626,7 @@ class Match(object):
         return cls(g, name=None, scope=SCOPE.ADMIN, user_object=user_obj, active=True,
                    resolver=None, client=g.client_ip, action=action,
                    adminuser=adminuser, adminrealm=adminrealm, time=None,
-                   sort_by_priority=True)
+                   sort_by_priority=True, serial=g.serial)
 
     @classmethod
     def admin_or_user(cls, g, action, user_obj):
@@ -2532,6 +2636,7 @@ class Match(object):
         and the given user_obj on which the admin is acting.
         If the currently logged-in user is a user, match policies against the username and the given realm.
         The client IP is matched implicitly.
+
         :param g: context object
         :param action: the policy action
         :param user_obj: the user_obj on which the administrator is acting
@@ -2554,26 +2659,29 @@ class Match(object):
         return cls(g, name=None, scope=scope, realm=userrealm, active=True,
                    resolver=None, user=username, user_object=user_obj,
                    client=g.client_ip, action=action, adminrealm=adminrealm, adminuser=adminuser,
-                   time=None, sort_by_priority=True)
+                   time=None, sort_by_priority=True, serial=g.serial)
 
     @classmethod
     def generic(cls, g, scope=None, realm=None, resolver=None, user=None, user_object=None,
                 client=None, action=None, adminrealm=None, adminuser=None, time=None,
-                active=True, sort_by_priority=True):
+                active=True, sort_by_priority=True, serial=None):
         """
         Low-level legacy policy matching interface: Search for active policies and return
         them sorted by priority. All parameters that should be used for matching have to
         be passed explicitly.
         The client IP has to be passed explicitly.
-        See ``PolicyClass.match_policies`` for details.
+        See :py:func:`privacyidea.lib.policy.PolicyClass.match_policies` for details.
+
         :rtype: ``Match``
         """
         if client is None:
             client = g.client_ip if hasattr(g, "client_ip") else None
+        if serial is None:
+            serial = g.serial if hasattr(g, "serial") else None
         return cls(g, name=None, scope=scope, realm=realm, active=active,
                    resolver=resolver, user=user, user_object=user_object,
                    client=client, action=action, adminrealm=adminrealm,
-                   adminuser=adminuser, time=time,
+                   adminuser=adminuser, time=time, serial=serial,
                    sort_by_priority=sort_by_priority)
 
 

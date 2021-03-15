@@ -191,6 +191,17 @@ view older entries.
 
 Can be something like 10m (10 minutes), 10h (10 hours) or 10d (ten days).
 
+hide_audit_columns
+~~~~~~~~~~~~~~~~~~
+
+type: string
+
+This species a blank separated list of audit columns, that should be removed
+from the response (:ref:`rest_audit`) and also from the WebUI.
+For example a value ``sig_check log_level`` will hide these two columns.
+
+The list of available columns can be checked by examining the response of the
+request to the :ref:`rest_audit`.
 
 updateuser
 ~~~~~~~~~~
@@ -309,3 +320,21 @@ The user does not see the value and can not change the value.
 For more details of this token type see :ref:`indexedsecret_token`.
 
 New in version 3.3.
+
+.. _user_trusted_attestation_CA:
+
+certificate_trusted_Attestation_CA_path
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+type: string
+
+A user can enroll a certificate token.
+If an attestation certificate is provided in addition, this policy holds the
+path to a directory, that contains trusted CA paths.
+Each PEM encoded file in this directory needs to contain the root CA certificate
+at the first position and the consecutive intermediate certificates.
+
+An additional enrollment policy :ref:`require_attestation`, if an attestation certificate
+is required.
+
+New in version 3.5.
